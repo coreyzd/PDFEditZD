@@ -1,0 +1,5 @@
+# Text files are stored with LF line endings in the repository, whichever git
+# commits them (Git for Windows, MSYS2 git, Linux). Each checkout then uses
+# its own line endings: CRLF from Git for Windows, LF elsewhere.
+* text=auto
+*.tar.gz binary
