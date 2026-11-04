@@ -626,11 +626,23 @@ int Document::addAnnotation(int pageIndex, const Annotation& a) {
 }
 
 int Document::updateAnnotation(int pageIndex, int index, const Annotation& a) {
-  if (pageIndex < 0 || pageIndex >= pageCount() || !a.editable()) return -1;
+  if (pageIndex < 0 || pageIndex >= pageCount() || !(a.editable() || a.kind == AnnotKind::Stamp)) return -1;
   std::lock_guard lock(engineMutex());
   Page p(cachedPage(pageIndex));
   if (!p.page) return -1;
   const PageFrame f = frameOf(p.page);
+  if (a.kind == AnnotKind::Stamp) {  // the drawing stays, fitted to the new rect
+    Annot h(FPDFPage_GetAnnot(p.page, index));
+    if (!h.a || FPDFAnnot_GetSubtype(h.a) != FPDF_ANNOT_STAMP) return -1;
+    FS_RECTF r = toFS(f.toUser(a.rect.normalized()));
+    FPDFAnnot_SetRect(h.a, &r);
+    setString(h.a, "Contents", a.contents);
+    setString(h.a, "M", a.modified.empty() ? pdfDateNow() : a.modified);
+    const int flags = FPDFAnnot_GetFlags(h.a);
+    FPDFAnnot_SetFlags(h.a, flags & ~FPDF_ANNOT_FLAG_HIDDEN);
+    markEdited();
+    return index;
+  }
   bool remake = false;
   Identity keep;
   {
@@ -744,5 +756,108 @@ bool Document::setAnnotationHidden(int pageIndex, int index, bool hidden) {
   const int flags = FPDFAnnot_GetFlags(h.a);
   return FPDFAnnot_SetFlags(h.a, hidden ? (flags | FPDF_ANNOT_FLAG_HIDDEN) : (flags & ~FPDF_ANNOT_FLAG_HIDDEN));
 }
+
+int Document::addStamp(int pageIndex, const Annotation& a, const StampDrawing& d) {
+  if (pageIndex < 0 || pageIndex >= pageCount() || d.width <= 0 || d.height <= 0) return -1;
+  const RectF box = a.rect.normalized();
+  if (box.width() <= 0 || box.height() <= 0) return -1;
+  std::lock_guard lock(engineMutex());
+  Page p(cachedPage(pageIndex));
+  if (!p.page) return -1;
+  const PageFrame f = frameOf(p.page);
+  Annot h(FPDFPage_CreateAnnot(p.page, FPDF_ANNOT_STAMP));
+  if (!h.a) return -1;
+  FPDFAnnot_SetFlags(h.a, FPDF_ANNOT_FLAG_PRINT);
+  FS_RECTF r = toFS(f.toUser(box));
+  FPDFAnnot_SetRect(h.a, &r);
+  setString(h.a, "NM", a.name.empty() ? uniqueName() : a.name);
+  setString(h.a, "CreationDate", pdfDateNow());
+  setString(h.a, "M", a.modified.empty() ? pdfDateNow() : a.modified);
+  setString(h.a, "Contents", a.contents);
+  if (!a.author.empty()) setString(h.a, "T", a.author);
+  if (!a.subject.empty()) setString(h.a, "Subj", a.subject);
+  setString(h.a, kStyleKey, formatStyle(a));
+  FPDFAnnot_SetColor(h.a, FPDFANNOT_COLORTYPE_Color, a.color.r, a.color.g, a.color.b, 255);
+
+  // Drawing coordinates -> display points in the rect -> user space (so it's upright on a
+  // rotated page too).
+  auto toUser = [&](PointF q) {
+    return f.toUser(PointF{box.left + q.x / d.width * box.width(), box.top + q.y / d.height * box.height()});
+  };
+  FPDF_DOCUMENT doc = static_cast<FPDF_DOCUMENT>(doc_);
+  bool ok = true;
+  if (d.imageWidth > 0 && d.imageHeight > 0 &&
+      d.imageBgra.size() >= std::size_t(d.imageWidth) * std::size_t(d.imageHeight) * 4) {
+    FPDF_BITMAP bmp = FPDFBitmap_Create(d.imageWidth, d.imageHeight, 1);
+    FPDF_PAGEOBJECT img = bmp ? FPDFPageObj_NewImageObj(doc) : nullptr;
+    if (img) {
+      auto* px = static_cast<std::uint8_t*>(FPDFBitmap_GetBuffer(bmp));
+      const int stride = FPDFBitmap_GetStride(bmp);
+      for (int y = 0; y < d.imageHeight; ++y)
+        std::copy_n(d.imageBgra.data() + std::size_t(y) * std::size_t(d.imageWidth) * 4, std::size_t(d.imageWidth) * 4,
+                    px + std::ptrdiff_t(y) * stride);
+      // The image's unit square, bottom-left first, onto the box's corners in user space.
+      const PointF bl = toUser({0, d.height}), br = toUser({d.width, d.height}), tl = toUser({0, 0});
+      ok = FPDFImageObj_SetBitmap(nullptr, 0, img, bmp) &&
+           FPDFImageObj_SetMatrix(img, br.x - bl.x, br.y - bl.y, tl.x - bl.x, tl.y - bl.y, bl.x, bl.y) &&
+           FPDFAnnot_AppendObject(h.a, img);
+      if (!ok) FPDFPageObj_Destroy(img);
+    } else {
+      ok = false;
+    }
+    if (bmp) FPDFBitmap_Destroy(bmp);
+  }
+  for (const StampDrawing::Path& path : d.paths) {
+    if (!ok || path.ops.empty() || path.ops.front().kind != StampDrawing::Op::MoveTo) continue;
+    const PointF start = toUser(path.ops.front().p[0]);
+    FPDF_PAGEOBJECT obj = FPDFPageObj_CreateNewPath(float(start.x), float(start.y));
+    if (!obj) {
+      ok = false;
+      break;
+    }
+    for (std::size_t i = 1; i < path.ops.size(); ++i) {
+      const StampDrawing::Op& op = path.ops[i];
+      switch (op.kind) {
+        case StampDrawing::Op::MoveTo: {
+          const PointF q = toUser(op.p[0]);
+          FPDFPath_MoveTo(obj, float(q.x), float(q.y));
+          break;
+        }
+        case StampDrawing::Op::LineTo: {
+          const PointF q = toUser(op.p[0]);
+          FPDFPath_LineTo(obj, float(q.x), float(q.y));
+          break;
+        }
+        case StampDrawing::Op::CubicTo: {
+          const PointF c1 = toUser(op.p[0]), c2 = toUser(op.p[1]), e = toUser(op.p[2]);
+          FPDFPath_BezierTo(obj, float(c1.x), float(c1.y), float(c2.x), float(c2.y), float(e.x), float(e.y));
+          break;
+        }
+        case StampDrawing::Op::Close: FPDFPath_Close(obj); break;
+      }
+    }
+    FPDFPageObj_SetFillColor(obj, path.color.r, path.color.g, path.color.b, 255);
+    FPDFPath_SetDrawMode(obj, FPDF_FILLMODE_WINDING, 0);
+    if (!FPDFAnnot_AppendObject(h.a, obj)) {
+      FPDFPageObj_Destroy(obj);
+      ok = false;
+    }
+  }
+  const int index = FPDFPage_GetAnnotIndex(p.page, h.a);
+  if (!ok) {
+    h.close();
+    FPDFPage_RemoveAnnot(p.page, index);
+    return -1;
+  }
+  markEdited();
+  return index;
+}
+
+// For the other parts of pdfz built on the same PDFium helpers (forms.cpp).
+namespace detail {
+std::u16string toUtf16(const std::string& s) { return utf8ToUtf16(s); }
+std::string toUtf8(const std::u16string& s) { return utf16ToUtf8(s); }
+PageFrame frameOfPage(void* page) { return frameOf(static_cast<FPDF_PAGE>(page)); }
+}  // namespace detail
 
 }  // namespace pdfz

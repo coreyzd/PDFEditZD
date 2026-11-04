@@ -3,6 +3,7 @@
 // main window shows one tab at a time and sends its menu and toolbar commands to it.
 #pragma once
 
+#include "Forms.hpp"
 #include "Markup.hpp"
 #include "TextSearch.hpp"
 
@@ -44,8 +45,9 @@ public:
   // Saves to `path`, which becomes the document's path; reports a failure itself.
   bool saveTo(const QString& path);
 
-  // What an edit changes, for redrawing: all the pages (and their layout), or one page's comments.
-  enum class Scope { Pages, Annotations };
+  // What an edit changes, for redrawing: all the pages (and their layout), one page's comments,
+  // or a form field's value (shown on `page`, and wherever else the field is).
+  enum class Scope { Pages, Annotations, Field };
   // An undoable edit: snapshots the document, runs `change` (true if it changed anything), then
   // redraws and shows `page`.
   bool applyEdit(const QString& label, int page, Scope scope, const std::function<bool(pdfz::Document&)>& change);
@@ -54,6 +56,8 @@ public:
 
   // Comments. Indices are the annotation's index on its page.
   void addAnnotation(int page, pdfz::Annotation a);  // asks for a note's text
+  // A signature, initials or mark: `a` has its rect and subject.
+  void addStamp(int page, pdfz::Annotation a, const pdfz::StampDrawing& drawing);
   // A note's text in a dialog; a text box is typed in where it is, on the page.
   void editAnnotation(int page, int index);
   void deleteAnnotation(int page, int index);
@@ -67,6 +71,12 @@ public:
   // The annotation as the cache has it, or nullptr.
   const pdfz::Annotation* annotation(int page, int index);
 
+  // Form fields (`index`: the widget's annotation index).
+  bool hasForm() const { return fields_.hasForm(); }
+  void setFieldText(int page, int index, const QString& text);
+  void setFieldChecked(int page, int index, bool checked);
+  void setFieldChoice(int page, int index, int option);
+
 signals:
   void stateChanged();                // name, modified, undo/redo, page count
   void contentChanged(bool pages);    // after an edit, undo or redo; `pages` if the text may have changed
@@ -76,6 +86,7 @@ private:
   void refresh(Scope scope, int page, int pageToShow);
   void showDocument(std::shared_ptr<pdfz::Document> doc, int pageToShow);  // undo/redo swap
   QString kindLabel(const pdfz::Annotation& a) const;
+  bool fillField(int page, int index, const std::function<bool(pdfz::Document&)>& change);
   void beginTextEdit(int page, int index);
   void onTextEditFinished(int page, int index, pdfz::Annotation a, bool changed);
   void refreshRendering(int page);  // the page's look changed, but not as an edit
@@ -86,6 +97,7 @@ private:
   PageRenderer* renderer_;
   TextCache textCache_;
   AnnotationCache annots_;
+  FieldCache fields_;
   TextSearch* search_;
   DocumentView* view_;
   ThumbnailPanel* thumbs_;    // shown in the main window's Pages panel

@@ -8,6 +8,7 @@
 #include "core/annotations.hpp"
 #include "core/document.hpp"
 #include "core/engine.hpp"
+#include "core/forms.hpp"
 
 #include <cmath>
 #include <cstdio>
@@ -113,9 +114,19 @@ int main(int argc, char** argv) {
       std::string text = a.contents.substr(0, 60);
       for (char& c : text)
         if (c == '\n' || c == '\r') c = ' ';
-      std::printf("        %-10s at %.0f,%.0f %.0fx%.0f  %s%s%s\n", pdfz::kindName(a.kind), a.rect.left, a.rect.top,
+      // A stamp by what it is (Signature, Check, APPROVED...).
+      const std::string kind = a.kind == pdfz::AnnotKind::Stamp && !a.subject.empty() ? a.subject : pdfz::kindName(a.kind);
+      std::printf("        %-10s at %.0f,%.0f %.0fx%.0f  %s%s%s\n", kind.c_str(), a.rect.left, a.rect.top,
                   a.rect.width(), a.rect.height(), a.author.empty() ? "" : a.author.c_str(), a.author.empty() ? "" : ": ",
                   text.c_str());
+    }
+    for (const pdfz::FormField& f : doc->formFields(i)) {
+      static const char* const types[] = {"?", "button", "check box", "radio", "combo box", "list box", "text", "signature"};
+      std::string value = f.isButton() ? (f.checked ? "on (" + f.onValue + ")" : "off") : f.value.substr(0, 60);
+      for (char& c : value)
+        if (c == '\n' || c == '\r') c = ' ';
+      std::printf("        Field %-9s %s = %s%s\n", types[int(f.type)], f.name.c_str(), value.c_str(),
+                  f.readOnly ? " (read-only)" : "");
     }
   }
   return 0;

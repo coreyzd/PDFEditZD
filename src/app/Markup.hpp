@@ -9,6 +9,7 @@
 #include <QMetaType>
 #include <QColor>
 #include <QFont>
+#include <QPainterPath>
 #include <QString>
 
 #include <memory>
@@ -41,9 +42,15 @@ bool canMove(const pdfz::Annotation& a);
 // Ones whose size can be changed by dragging a corner.
 bool canResize(const pdfz::Annotation& a);
 
-// The tools that make markups, and their remembered styles.
-enum class MarkupTool { Highlight, Underline, StrikeOut, Note, TextBox, Pen, Rectangle, Ellipse, Line, Arrow };
-constexpr int kMarkupToolCount = 10;
+// The tools that make markups, and their remembered styles: the comment tools, then the Fill &
+// Sign ones (text without a box, check marks, crosses, dots and today's date).
+enum class MarkupTool {
+  Highlight, Underline, StrikeOut, Note, TextBox, Pen, Rectangle, Ellipse, Line, Arrow,
+  FillText, Check, Cross, Dot, Date
+};
+constexpr int kMarkupToolCount = 15;
+constexpr int kCommentToolCount = 10;  // the first ten
+inline bool isFillSignTool(MarkupTool t) { return int(t) >= kCommentToolCount; }
 
 struct MarkupStyle {
   QColor color;            // the stroke, markup or note color; a text box's border
@@ -84,6 +91,16 @@ bool usesText(MarkupTool t);
 bool usesFill(const pdfz::Annotation& a);
 bool usesWidth(const pdfz::Annotation& a);
 bool usesText(const pdfz::Annotation& a);
+bool usesOpacity(MarkupTool t);
+bool usesOpacity(const pdfz::Annotation& a);
+
+// Fill & Sign marks (check, cross, dot): stamps drawn here as outlines, by their subject.
+bool isMark(const pdfz::Annotation& a);
+const char* markSubject(MarkupTool t);  // "Check", "Cross", "Dot"; nullptr for other tools
+pdfz::StampDrawing markDrawing(const std::string& subject, const QColor& color);
+double markSize(MarkupTool t);          // its usual width and height, in points
+// A Qt path as a stamp's filled outline (any curves kept).
+pdfz::StampDrawing::Path stampPath(const QPainterPath& path, const QColor& color);
 
 // The strokes of an arrow from `tail` to `tip`: the shaft, then an open head whose size grows
 // with the line width, so it stays an arrow when the line is thick (as Acrobat draws them).

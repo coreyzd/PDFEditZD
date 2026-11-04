@@ -36,6 +36,10 @@ QIcon swatch(const QColor& c) {
 QString describe(const pdfz::Annotation& a) {
   QString head = QObject::tr(pdfz::kindName(a.kind));
   if (a.subject == "Arrow" || a.subject == "Line") head = QObject::tr(a.subject.c_str());
+  if (a.kind == pdfz::AnnotKind::Stamp && !a.subject.empty())
+    head = a.subject == "Check" ? QObject::tr("Checkmark") : QObject::tr(a.subject.c_str());  // Signature, Initials...
+  if (a.kind == pdfz::AnnotKind::FreeText && a.subject == "Date") head = QObject::tr("Date");
+  if (a.kind == pdfz::AnnotKind::FreeText && a.subject == "Fill Text") head = QObject::tr("Text");
   QStringList parts{head};
   if (!a.author.empty()) parts << QString::fromStdString(a.author);
   const QString when = formatPdfDate(a.modified);
@@ -210,7 +214,7 @@ void CommentsPanel::showAnnotation(int page, int index) {
 void CommentsPanel::updateSummary() {
   int n = 0;
   for (int i = 0; i < tree_->topLevelItemCount(); ++i) n += tree_->topLevelItem(i)->childCount();
-  QString s = !doc_ ? QString() : n == 0 ? tr("No comments") : tr("%n comment(s)", nullptr, n);
+  QString s = !doc_ ? QString() : n == 0 ? tr("No comments") : (n == 1 ? tr("1 comment") : tr("%1 comments").arg(n));
   if (scan_.isActive()) s += tr(" (still looking…)");
   summary_->setText(s);
 }

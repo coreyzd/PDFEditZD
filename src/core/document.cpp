@@ -10,8 +10,11 @@
 #include <set>
 #include <system_error>
 
+#include <fpdf_annot.h>
 #include <fpdf_doc.h>
 #include <fpdf_edit.h>
+#include <fpdf_flatten.h>
+#include <fpdf_formfill.h>
 #include <fpdf_ppo.h>
 #include <fpdf_save.h>
 #include <fpdfview.h>
@@ -28,6 +31,30 @@ struct PageHandle {
   explicit PageHandle(void* p) : page(static_cast<FPDF_PAGE>(p)) {}
   explicit operator bool() const { return page != nullptr; }
 };
+
+// Whether a comment (anything but a field, a link or a pop-up) overlaps a form field on the
+// page. The form layer draws fields over everything, so those pages need drawing with care.
+bool annotationsOverFields(FPDF_PAGE page) {
+  std::vector<FS_RECTF> fields, others;
+  const int n = FPDFPage_GetAnnotCount(page);
+  for (int i = 0; i < n; ++i) {
+    FPDF_ANNOTATION a = FPDFPage_GetAnnot(page, i);
+    if (!a) continue;
+    const int type = FPDFAnnot_GetSubtype(a);
+    FS_RECTF r{};
+    const bool visible = !(FPDFAnnot_GetFlags(a) & FPDF_ANNOT_FLAG_HIDDEN);
+    if (visible && FPDFAnnot_GetRect(a, &r) && type != FPDF_ANNOT_LINK && type != FPDF_ANNOT_POPUP) {
+      const FS_RECTF norm{std::min(r.left, r.right), std::max(r.top, r.bottom), std::max(r.left, r.right),
+                          std::min(r.top, r.bottom)};
+      (type == FPDF_ANNOT_WIDGET ? fields : others).push_back(norm);
+    }
+    FPDFPage_CloseAnnot(a);
+  }
+  for (const FS_RECTF& f : fields)
+    for (const FS_RECTF& o : others)
+      if (o.left < f.right && f.left < o.right && o.bottom < f.top && f.bottom < o.top) return true;
+  return false;
+}
 
 constexpr std::size_t kCachedPages = 4;
 
@@ -142,6 +169,7 @@ OpenResult Document::openBytes(Bytes bytes, const std::string& password) {
                                    password.empty() ? nullptr : password.c_str());
   if (!d->doc_) return {nullptr, fromPdfiumError(FPDF_GetLastError())};
   d->refreshPageSizes();
+  d->initForms();
   return {std::move(d), OpenError::None};
 }
 
@@ -151,6 +179,7 @@ std::unique_ptr<Document> Document::create() {
   std::lock_guard lock(engineMutex());
   d->doc_ = FPDF_CreateNewDocument();
   if (!d->doc_) return nullptr;
+  d->initForms();
   return d;
 }
 
@@ -158,6 +187,7 @@ Document::~Document() {
   if (doc_) {
     std::lock_guard lock(engineMutex());
     dropCachedPages();
+    exitForms();
     FPDF_CloseDocument(asDoc(doc_));
   }
 }
@@ -170,17 +200,40 @@ void* Document::cachedPage(int index) const {
     }
   FPDF_PAGE page = FPDF_LoadPage(asDoc(doc_), index);
   if (!page) return nullptr;
+  if (form_) FORM_OnAfterLoadPage(page, static_cast<FPDF_FORMHANDLE>(form_));
   if (pages_.size() >= kCachedPages) {
-    FPDF_ClosePage(static_cast<FPDF_PAGE>(pages_.back().second));
+    closePage(pages_.back().second);
     pages_.pop_back();
   }
   pages_.insert(pages_.begin(), {index, page});
   return page;
 }
 
+void Document::closePage(void* page) const {
+  if (form_) FORM_OnBeforeClosePage(static_cast<FPDF_PAGE>(page), static_cast<FPDF_FORMHANDLE>(form_));
+  FPDF_ClosePage(static_cast<FPDF_PAGE>(page));
+}
+
 void Document::dropCachedPages() const {
-  for (auto& [index, page] : pages_) FPDF_ClosePage(static_cast<FPDF_PAGE>(page));
+  for (auto& [index, page] : pages_) closePage(page);
   pages_.clear();
+}
+
+void Document::initForms() {
+  // No callbacks: pdfz has no JavaScript, timers or pop-up menus for PDFium to drive. Field
+  // values and their appearances are all it needs.
+  auto* info = new FPDF_FORMFILLINFO{};
+  info->version = 1;
+  formInfo_ = info;
+  form_ = FPDFDOC_InitFormFillEnvironment(asDoc(doc_), info);
+  hasForm_ = FPDF_GetFormType(asDoc(doc_)) != FORMTYPE_NONE;
+}
+
+void Document::exitForms() {
+  if (form_) FPDFDOC_ExitFormFillEnvironment(static_cast<FPDF_FORMHANDLE>(form_));
+  form_ = nullptr;
+  delete static_cast<FPDF_FORMFILLINFO*>(formInfo_);
+  formInfo_ = nullptr;
 }
 
 void Document::refreshPageSizes() {
@@ -251,6 +304,42 @@ Bitmap Document::render(int index, double scale, PixelRect region, unsigned flag
                     static_cast<float>(-region.x), static_cast<float>(-region.y)};
   const FS_RECTF clip{0, 0, static_cast<float>(out.width), static_cast<float>(out.height)};
   FPDF_RenderPageBitmapWithMatrix(bmp, page.page, &m, &clip, pdfiumFlags(flags));
+  // Form fields aren't drawn with the page: PDFium's form layer draws them, at the same place
+  // (it takes the page's position and size rather than a matrix), over everything else.
+  if (form_ && hasForm_ && (flags & RenderAnnotations)) {
+    const SizeF s = pageSize(index);
+    const int pageW = static_cast<int>(std::lround(s.width * scale));
+    const int pageH = static_cast<int>(std::lround(s.height * scale));
+    auto drawFields = [&](FPDF_BITMAP target) {
+      FPDF_FFLDraw(static_cast<FPDF_FORMHANDLE>(form_), target, page.page, -region.x, -region.y, pageW, pageH, 0,
+                   pdfiumFlags(flags));
+    };
+    if (!annotationsOverFields(page.page)) {
+      drawFields(bmp);
+    } else {
+      // A comment or signature on a field must stay on top of it, as it is in the file. The
+      // page is drawn again without comments, with the fields: wherever the comments changed
+      // nothing, that's what shows.
+      std::vector<std::uint8_t> plain(out.pixels.size()), fields(out.pixels.size());
+      FPDF_BITMAP p = FPDFBitmap_CreateEx(out.width, out.height, FPDFBitmap_BGRA, plain.data(), out.stride);
+      if (p) {
+        FPDFBitmap_FillRect(p, 0, 0, out.width, out.height, 0xFFFFFFFF);
+        FPDF_RenderPageBitmapWithMatrix(p, page.page, &m, &clip, pdfiumFlags(flags) & ~FPDF_ANNOT);
+        FPDFBitmap_Destroy(p);
+        fields = plain;
+        FPDF_BITMAP f = FPDFBitmap_CreateEx(out.width, out.height, FPDFBitmap_BGRA, fields.data(), out.stride);
+        if (f) {
+          drawFields(f);
+          FPDFBitmap_Destroy(f);
+        }
+        auto* px = reinterpret_cast<std::uint32_t*>(out.pixels.data());
+        const auto* pl = reinterpret_cast<const std::uint32_t*>(plain.data());
+        const auto* fl = reinterpret_cast<const std::uint32_t*>(fields.data());
+        for (std::size_t i = 0, n = out.pixels.size() / 4; i < n; ++i)
+          if (px[i] == pl[i]) px[i] = fl[i];
+      }
+    }
+  }
   FPDFBitmap_Destroy(bmp);
   return out;
 }
@@ -271,8 +360,52 @@ bool Document::deletePage(int index) {
   dropCachedPages();
   FPDFPage_Delete(asDoc(doc_), index);
   refreshPageSizes();
+  exitForms();  // no pages are loaded now
+  initForms();
   markEdited();
   return true;
+}
+
+bool Document::deletePages(std::vector<int> pages) {
+  std::sort(pages.begin(), pages.end());
+  pages.erase(std::unique(pages.begin(), pages.end()), pages.end());
+  const int n = pageCount();
+  if (pages.empty() || int(pages.size()) >= n || pages.front() < 0 || pages.back() >= n) return false;
+  std::lock_guard lock(engineMutex());
+  flushAppearances();
+  dropCachedPages();
+  for (auto it = pages.rbegin(); it != pages.rend(); ++it) FPDFPage_Delete(asDoc(doc_), *it);
+  refreshPageSizes();
+  exitForms();  // no pages are loaded now
+  initForms();
+  markEdited();
+  return true;
+}
+
+std::unique_ptr<Document> Document::extract(const std::vector<int>& pages) const {
+  const int n = pageCount();
+  if (pages.empty() || std::set<int>(pages.begin(), pages.end()).size() != pages.size()) return nullptr;
+  for (int p : pages)
+    if (p < 0 || p >= n) return nullptr;
+  const Bytes bytes = snapshot();
+  if (!bytes) return nullptr;
+  auto [copy, err] = openBytes(bytes, password_);
+  if (!copy) return nullptr;
+  // The pages not wanted go; then the rest are put in the order asked for.
+  std::vector<int> others;
+  const std::set<int> keep(pages.begin(), pages.end());
+  for (int i = 0; i < n; ++i)
+    if (!keep.count(i)) others.push_back(i);
+  if (!others.empty() && !copy->deletePages(others)) return nullptr;
+  std::vector<int> sorted = pages;
+  std::sort(sorted.begin(), sorted.end());
+  if (sorted != pages) {
+    // Where each wanted page is now (its rank among the kept ones), in the order wanted.
+    std::vector<int> now;
+    for (int p : pages) now.push_back(int(std::lower_bound(sorted.begin(), sorted.end(), p) - sorted.begin()));
+    if (!copy->movePages(now, 0)) return nullptr;
+  }
+  return std::move(copy);
 }
 
 bool Document::insertBlankPage(int index, SizeF size) {
@@ -284,6 +417,8 @@ bool Document::insertBlankPage(int index, SizeF size) {
   if (!page) return false;
   FPDF_ClosePage(page);
   refreshPageSizes();
+  exitForms();  // no pages are loaded now
+  initForms();
   markEdited();
   return true;
 }
@@ -300,6 +435,8 @@ bool Document::importPages(const Document& source, const std::vector<int>& pages
                                static_cast<unsigned long>(pages.size()), index))
     return false;
   refreshPageSizes();
+  exitForms();  // no pages are loaded now
+  initForms();
   markEdited();
   return true;
 }
@@ -317,6 +454,8 @@ bool Document::movePages(const std::vector<int>& pages, int destIndex) {
   // Checked above, so PDFium's "may be left in an indeterminate state" failure can't happen.
   const bool ok = FPDF_MovePages(asDoc(doc_), pages.data(), static_cast<unsigned long>(count), destIndex);
   refreshPageSizes();
+  exitForms();  // no pages are loaded now
+  initForms();
   markEdited();
   return ok;
 }
@@ -356,12 +495,10 @@ Bytes Document::snapshot() const {
   return out;
 }
 
-bool Document::save(const std::filesystem::path& path) const {
-  std::vector<std::uint8_t> bytes;
-  {
-    std::lock_guard lock(engineMutex());
-    if (!writeTo(bytes)) return false;
-  }
+namespace {
+
+// Writes `bytes` to a temporary file next to `path`, then puts it in place of `path`.
+bool replaceFile(const std::filesystem::path& path, const std::vector<std::uint8_t>& bytes) {
   std::filesystem::path tmp = path;
   tmp += ".pdfz-saving";
   {
@@ -381,8 +518,50 @@ bool Document::save(const std::filesystem::path& path) const {
     std::filesystem::remove(tmp, ec);
     return false;
   }
+  return true;
+}
+
+}  // namespace
+
+bool Document::save(const std::filesystem::path& path) const {
+  std::vector<std::uint8_t> bytes;
+  {
+    std::lock_guard lock(engineMutex());
+    if (!writeTo(bytes)) return false;
+  }
+  if (!replaceFile(path, bytes)) return false;
   modified_ = false;
   return true;
+}
+
+bool Document::saveFlattened(const std::filesystem::path& path) const {
+  std::vector<std::uint8_t> bytes;
+  {
+    std::lock_guard lock(engineMutex());
+    std::vector<std::uint8_t> copy;
+    if (!writeTo(copy)) return false;
+    // Flattened in a copy opened from those bytes, so this document keeps everything editable.
+    FPDF_DOCUMENT flat = FPDF_LoadMemDocument64(copy.data(), copy.size(), password_.empty() ? nullptr : password_.c_str());
+    if (!flat) return false;
+    bool ok = true;
+    const int n = FPDF_GetPageCount(flat);
+    for (int i = 0; i < n && ok; ++i) {
+      FPDF_PAGE page = FPDF_LoadPage(flat, i);
+      if (!page) {
+        ok = false;
+        break;
+      }
+      if (FPDFPage_Flatten(page, FLAT_NORMALDISPLAY) == FLATTEN_FAIL) ok = false;
+      FPDF_ClosePage(page);
+    }
+    if (ok) {
+      VectorWriter writer(&bytes);
+      ok = FPDF_SaveAsCopy(flat, &writer, FPDF_NO_INCREMENTAL) != 0;
+    }
+    FPDF_CloseDocument(flat);
+    if (!ok) return false;
+  }
+  return replaceFile(path, bytes);
 }
 
 }  // namespace pdfz

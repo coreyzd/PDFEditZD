@@ -265,3 +265,31 @@ TEST_CASE("metadata comes back as UTF-8") {
   CHECK(doc->metadata("Author") == "Corey");
   CHECK(doc->metadata("Subject").empty());
 }
+
+TEST_CASE("extracting pages, and deleting several at once") {
+  auto doc = pdfz::Document::create();
+  // Pages told apart by their widths.
+  for (int i = 0; i < 6; ++i) REQUIRE(doc->insertBlankPage(i, {100.0 + 10 * i, 200}));
+  auto [d, err] = pdfz::Document::openMemory(doc->saveToMemory());
+  REQUIRE(d);
+  auto part = d->extract({4, 1, 2});
+  REQUIRE(part);
+  REQUIRE(part->pageCount() == 3);
+  CHECK(part->pageSize(0).width == doctest::Approx(140));
+  CHECK(part->pageSize(1).width == doctest::Approx(110));
+  CHECK(part->pageSize(2).width == doctest::Approx(120));
+  CHECK(d->pageCount() == 6);  // the original keeps its pages
+  CHECK(!d->extract({}));
+  CHECK(!d->extract({1, 1}));
+  CHECK(!d->extract({9}));
+  auto all = d->extract({0, 1, 2, 3, 4, 5});
+  REQUIRE(all);
+  CHECK(all->pageCount() == 6);
+
+  REQUIRE(d->deletePages({5, 0, 2}));
+  REQUIRE(d->pageCount() == 3);
+  CHECK(d->pageSize(0).width == doctest::Approx(110));
+  CHECK(d->pageSize(1).width == doctest::Approx(130));
+  CHECK(d->pageSize(2).width == doctest::Approx(140));
+  CHECK(!d->deletePages({0, 1, 2}));  // not every page
+}

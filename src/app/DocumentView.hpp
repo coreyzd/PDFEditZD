@@ -6,12 +6,14 @@
 // and the document tab adds it as an undoable edit.
 #pragma once
 
+#include "Forms.hpp"
 #include "Markup.hpp"
 
 #include "core/annotations.hpp"
 
 #include <QAbstractScrollArea>
 #include <QElapsedTimer>
+#include <QImage>
 #include <QPoint>
 #include <QRectF>
 #include <QTimer>
@@ -20,6 +22,7 @@
 #include <vector>
 
 class AnnotationCache;
+class FieldCache;
 class InlineTextEdit;
 class PageRenderer;
 class TextCache;
@@ -33,11 +36,12 @@ public:
   enum class FitMode { None, Width, Page };
   // Select: click a comment to select it (and drag to move it), drag over text to select it,
   // drag anywhere else to move the pages. Hand: dragging always moves the pages. Markup: the
-  // markup tool set with setMarkupTool().
-  enum class Tool { Select, Hand, Markup };
+  // markup tool set with setMarkupTool(). Place: a click puts down the stamp given to
+  // startPlacing() (a signature), then it's back to Select.
+  enum class Tool { Select, Hand, Markup, Place };
 
   DocumentView(PageRenderer* renderer, TextCache* text, TextSearch* search, AnnotationCache* annots,
-               QWidget* parent = nullptr);
+               FieldCache* fields, QWidget* parent = nullptr);
 
   // The document (or its pages) changed: lay it out again, keeping the current page in view
   // when `keepPosition` is set, otherwise starting at the top.
@@ -62,6 +66,10 @@ public:
   MarkupTool markupTool() const { return markupTool_; }
   void setMarkupTool(MarkupTool tool, const MarkupStyle& style);
   void setMarkupStyle(const MarkupStyle& style) { markupStyle_ = style; }
+  // Shows `preview` under the mouse, `size` points big, until a click on a page places the
+  // stamp there (stampCreated).
+  void startPlacing(const pdfz::Annotation& stamp, const pdfz::StampDrawing& drawing, const QImage& preview,
+                    QSizeF size);
 
   // Comments. Annotations are identified by page and their index in the page's list.
   bool selectedAnnotation(int& page, int& index) const;
@@ -84,6 +92,15 @@ public:
   // The box being typed in, as it stands (nullptr if none).
   const pdfz::Annotation* editedText() const { return editor_ ? &editAnnot_ : nullptr; }
 
+  // Form fields: with the Select tool, a click fills one in (types in a text field on the
+  // page, toggles a check box, opens a list of choices); Tab and Shift+Tab go through them.
+  void setHighlightFields(bool on);
+  bool highlightFields() const { return highlightFields_; }
+  // The fields changed (the cache has been told): repaint.
+  void fieldsChanged();
+  // Ends typing in a form field: emits fieldTextChanged if the text changed.
+  void commitFieldEdit();
+
   // Text selection. It may run across pages.
   bool hasSelection() const;
   QString selectedText() const;  // pages joined by line breaks
@@ -102,6 +119,7 @@ signals:
   void zoomChanged(double zoom, DocumentView::FitMode mode);
   void selectionChanged(bool hasSelection);
   void annotationCreated(int page, const pdfz::Annotation& annotation);
+  void stampCreated(int page, const pdfz::Annotation& stamp, const pdfz::StampDrawing& drawing);
   void annotationMoved(int page, int index, double dx, double dy);  // display points
   void annotationResized(int page, int index, const pdfz::RectF& rect);
   void annotationEditRequested(int page, int index);
@@ -115,6 +133,12 @@ signals:
   void textEditFinished(int page, int index, const pdfz::Annotation& a, bool changed);
   // Esc with nothing left to cancel: back to the Select tool.
   void toolResetRequested();
+  // Filling in a form field (`index`: the widget's annotation index on `page`).
+  void fieldTextChanged(int page, int index, const QString& text);
+  void fieldCheckRequested(int page, int index, bool checked);
+  void fieldChoiceRequested(int page, int index, int option);
+  // A click on a signature field: sign there.
+  void signatureFieldClicked(int page, const pdfz::RectF& rect);
 
 protected:
   void paintEvent(QPaintEvent*) override;
@@ -128,6 +152,7 @@ protected:
   void mouseDoubleClickEvent(QMouseEvent*) override;
   void contextMenuEvent(QContextMenuEvent*) override;
   void changeEvent(QEvent*) override;
+  bool focusNextPrevChild(bool next) override;
 
 private:
   double pixelsPerPoint() const;  // logical pixels per PDF point at the current zoom
@@ -173,10 +198,22 @@ private:
   const pdfz::Annotation* selected() const;
   pdfz::RectF selectedBounds() const;  // display points
   int resizeHandleUnder(QPointF viewportPos) const;  // 0..3 (TL, TR, BL, BR), or -1
+  pdfz::RectF resizedBounds() const;  // the selected comment's rect as the corner drag has it
+  void placeMark(int page, QPointF point);  // a check mark, cross or dot, centered there
+  void placeDate(int page, QPointF point);
   void finishCreate();
   void paintOverlays(QPainter& p);
   void layoutEditor(bool restyle);  // over the box, at the zoom; `restyle`: font and colors too
   void fitEditorHeight();
+  // Form fields.
+  bool fieldUnder(QPointF viewportPos, int& page, int& listPos) const;
+  void activateField(int page, const pdfz::FormField& f);  // what a click (or Space) does
+  void startFieldEdit(int page, const pdfz::FormField& f);
+  void showChoices(int page, const pdfz::FormField& f);
+  void moveFieldFocus(bool backwards);
+  void setFieldFocus(int page, int index);
+  const pdfz::FormField* focusedField() const;
+  void layoutFieldEditor(bool restyle);
 
   PageRenderer* renderer_;
   TextCache* text_;
@@ -219,4 +256,20 @@ private:
   pdfz::Annotation editAnnot_;
   pdfz::Annotation editOriginal_;
   quint64 editGeneration_ = 0;  // tells a stale editor's late signals apart
+  // Placing a stamp.
+  pdfz::Annotation placeStamp_;
+  pdfz::StampDrawing placeDrawing_;
+  QImage placePreview_;
+  QSizeF placeSize_;
+  int hoverPage_ = -1;
+  QPointF hoverPoint_;  // on hoverPage_, in display points
+  // Form fields.
+  FieldCache* fields_;
+  bool highlightFields_ = true;
+  QWidget* fieldEditor_ = nullptr;  // FieldLineEdit or InlineTextEdit
+  int fieldPage_ = -1;
+  pdfz::FormField fieldEdited_;
+  quint64 fieldGeneration_ = 0;
+  int focusPage_ = -1;   // the field with the keyboard (Tab, Space), if any
+  int focusIndex_ = -1;
 };

@@ -14,6 +14,10 @@ add_executable(pdfeditzd
   DocumentTab.cpp
   InlineTextEdit.cpp
   Markup.cpp
+  Forms.cpp
+  Signatures.cpp
+  Stamps.cpp
+  SignatureDialog.cpp
   CommentDialog.cpp
   CommentsPanel.cpp
   ToolIcons.cpp

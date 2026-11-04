@@ -53,12 +53,72 @@ void InlineTextEdit::keyPressEvent(QKeyEvent* e) {
   QTextEdit::keyPressEvent(e);
 }
 
+bool focusLeftForGood(QFocusEvent* e) {
+  if (e->reason() == Qt::PopupFocusReason || e->reason() == Qt::ActiveWindowFocusReason) return false;
+  if (QApplication::activePopupWidget()) return false;
+  if (QWidget* now = QApplication::focusWidget(); now && (now->window()->windowFlags() & Qt::Popup) == Qt::Popup)
+    return false;
+  return true;
+}
+
+namespace {
+// Tab or Shift+Tab, which widgets otherwise hand to the focus chain before seeing them.
+bool isTab(QEvent* e, bool& backwards) {
+  if (e->type() != QEvent::KeyPress) return false;
+  auto* k = static_cast<QKeyEvent*>(e);
+  if (k->modifiers() & (Qt::ControlModifier | Qt::AltModifier)) return false;
+  backwards = k->key() == Qt::Key_Backtab || (k->key() == Qt::Key_Tab && (k->modifiers() & Qt::ShiftModifier));
+  return k->key() == Qt::Key_Tab || k->key() == Qt::Key_Backtab;
+}
+}  // namespace
+
+void InlineTextEdit::setFormField(const QColor& background) {
+  formField_ = true;
+  setAttribute(Qt::WA_TranslucentBackground, false);
+  viewport()->setAutoFillBackground(true);
+  QPalette pal = palette();
+  pal.setColor(QPalette::Base, background);
+  setPalette(pal);
+}
+
+bool InlineTextEdit::event(QEvent* e) {
+  bool back = false;
+  if (formField_ && isTab(e, back)) {
+    emit tabbed(back);
+    return true;
+  }
+  return QTextEdit::event(e);
+}
+
 void InlineTextEdit::focusOutEvent(QFocusEvent* e) {
   QTextEdit::focusOutEvent(e);
-  // A menu or a list opening (a combo box's), or the window losing the focus (another program,
-  // a color dialog), isn't the end: the keyboard comes back here afterwards.
-  if (e->reason() == Qt::PopupFocusReason || e->reason() == Qt::ActiveWindowFocusReason) return;
-  if (QApplication::activePopupWidget()) return;
-  if (QWidget* now = QApplication::focusWidget(); now && (now->window()->windowFlags() & Qt::Popup) == Qt::Popup) return;
-  emit finished();
+  if (focusLeftForGood(e)) emit finished();
+}
+
+FieldLineEdit::FieldLineEdit(QWidget* parent) : QLineEdit(parent) {
+  setFrame(false);
+  setTextMargins(0, 0, 0, 0);
+}
+
+bool FieldLineEdit::event(QEvent* e) {
+  bool back = false;
+  if (isTab(e, back)) {
+    emit tabbed(back);
+    return true;
+  }
+  return QLineEdit::event(e);
+}
+
+void FieldLineEdit::keyPressEvent(QKeyEvent* e) {
+  if (e->key() == Qt::Key_Escape || e->key() == Qt::Key_Return || e->key() == Qt::Key_Enter) {
+    e->accept();
+    emit finished();
+    return;
+  }
+  QLineEdit::keyPressEvent(e);
+}
+
+void FieldLineEdit::focusOutEvent(QFocusEvent* e) {
+  QLineEdit::focusOutEvent(e);
+  if (focusLeftForGood(e)) emit finished();
 }

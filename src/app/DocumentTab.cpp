@@ -22,7 +22,7 @@
 DocumentTab::DocumentTab(QWidget* parent) : QWidget(parent) {
   renderer_ = new PageRenderer(this);
   search_ = new TextSearch(this);
-  view_ = new DocumentView(renderer_, &textCache_, search_, &annots_, this);
+  view_ = new DocumentView(renderer_, &textCache_, search_, &annots_, &fields_, this);
   auto* lay = new QVBoxLayout(this);
   lay->setContentsMargins(0, 0, 0, 0);
   lay->addWidget(view_);
@@ -33,6 +33,7 @@ DocumentTab::DocumentTab(QWidget* parent) : QWidget(parent) {
   // Queued: adding a note or a text box opens a dialog, which shouldn't run inside the view's
   // mouse handling.
   connect(view_, &DocumentView::annotationCreated, this, &DocumentTab::addAnnotation, Qt::QueuedConnection);
+  connect(view_, &DocumentView::stampCreated, this, &DocumentTab::addStamp);
   connect(view_, &DocumentView::annotationMoved, this, &DocumentTab::moveAnnotation);
   connect(view_, &DocumentView::annotationResized, this, &DocumentTab::resizeAnnotation);
   connect(view_, &DocumentView::annotationEditRequested, this, &DocumentTab::editAnnotation);
@@ -46,6 +47,9 @@ DocumentTab::DocumentTab(QWidget* parent) : QWidget(parent) {
   });
   connect(comments_, &CommentsPanel::editRequested, this, &DocumentTab::editAnnotation);
   connect(view_, &DocumentView::textEditFinished, this, &DocumentTab::onTextEditFinished);
+  connect(view_, &DocumentView::fieldTextChanged, this, &DocumentTab::setFieldText);
+  connect(view_, &DocumentView::fieldCheckRequested, this, &DocumentTab::setFieldChecked);
+  connect(view_, &DocumentView::fieldChoiceRequested, this, &DocumentTab::setFieldChoice);
   connect(comments_, &CommentsPanel::deleteRequested, this, &DocumentTab::deleteAnnotation);
   connect(thumbs_, &ThumbnailPanel::pageActivated, view_, &DocumentView::goToPage);
 }
@@ -70,6 +74,7 @@ void DocumentTab::setDocument(std::shared_ptr<pdfz::Document> doc, const QString
   search_->clear();
   textCache_.setDocument(doc_);
   annots_.setDocument(doc_);
+  fields_.setDocument(doc_);
   renderer_->setDocument(doc_);
   thumbs_->documentChanged();
   comments_->setDocument(doc_);
@@ -113,6 +118,22 @@ bool DocumentTab::applyEdit(const QString& label, int page, Scope scope,
 }
 
 void DocumentTab::refresh(Scope scope, int page, int pageToShow) {
+  if (scope == Scope::Field) {
+    // The field may be shown on other pages too (those looked at so far are known).
+    std::vector<int> pages = {page};
+    for (const pdfz::FormField& f : *fields_.get(page))
+      for (int p : fields_.pagesWithField(f.name))
+        if (std::find(pages.begin(), pages.end(), p) == pages.end()) pages.push_back(p);
+    fields_.invalidate();
+    for (int p : pages) {
+      renderer_->invalidatePage(p);
+      thumbs_->pageChanged(p);
+    }
+    view_->fieldsChanged();
+    emit stateChanged();
+    emit contentChanged(false);
+    return;
+  }
   if (scope == Scope::Annotations) {
     annots_.invalidate(page);
     renderer_->invalidatePage(page);
@@ -127,6 +148,7 @@ void DocumentTab::refresh(Scope scope, int page, int pageToShow) {
   view_->clearAnnotationSelection();
   textCache_.setDocument(doc_);
   annots_.setDocument(doc_);
+  fields_.setDocument(doc_);
   renderer_->invalidate();
   thumbs_->documentChanged();
   comments_->setDocument(doc_);
@@ -176,6 +198,16 @@ void DocumentTab::redo() {
 // Comments
 
 QString DocumentTab::kindLabel(const pdfz::Annotation& a) const {
+  if (a.kind == pdfz::AnnotKind::Stamp) {
+    if (a.subject == "Signature") return tr("Signature");
+    if (a.subject == "Initials") return tr("Initials");
+    if (a.subject == "Check") return tr("Checkmark");
+    if (a.subject == "Cross") return tr("Cross");
+    if (a.subject == "Dot") return tr("Dot");
+    return tr("Stamp");
+  }
+  if (a.kind == pdfz::AnnotKind::FreeText && a.subject == "Date") return tr("Date");
+  if (a.kind == pdfz::AnnotKind::FreeText && a.subject == "Fill Text") return tr("Text");
   if (a.subject == "Arrow") return tr("Arrow");
   if (a.subject == "Line") return tr("Line");
   if (a.kind == pdfz::AnnotKind::Note) return tr("Sticky Note");
@@ -210,6 +242,18 @@ void DocumentTab::addAnnotation(int page, pdfz::Annotation a) {
   }
 }
 
+void DocumentTab::addStamp(int page, pdfz::Annotation a, const pdfz::StampDrawing& drawing) {
+  if (!doc_) return;
+  a.kind = pdfz::AnnotKind::Stamp;
+  a.author = commentAuthor().toStdString();
+  int added = -1;
+  if (applyEdit(tr("Add %1").arg(kindLabel(a)), page, Scope::Annotations, [&](pdfz::Document& d) {
+        added = d.addStamp(page, a, drawing);
+        return added >= 0;
+      }))
+    view_->selectAnnotation(page, added, false);
+}
+
 void DocumentTab::editAnnotation(int page, int index) {
   const pdfz::Annotation* found = annotation(page, index);
   if (!found) return;
@@ -217,6 +261,7 @@ void DocumentTab::editAnnotation(int page, int index) {
     beginTextEdit(page, index);
     return;
   }
+  if (found->kind == pdfz::AnnotKind::Stamp) return;  // a signature or mark has nothing to edit
   const pdfz::Annotation a = *found;
   QString byline = QString::fromStdString(a.author);
   const QString when = formatPdfDate(a.modified);
@@ -230,7 +275,32 @@ void DocumentTab::editAnnotation(int page, int index) {
   view_->selectAnnotation(page, index, false);
 }
 
-void DocumentTab::finishTextEditing() { view_->commitTextEdit(); }
+void DocumentTab::finishTextEditing() {
+  view_->commitTextEdit();
+  view_->commitFieldEdit();
+}
+
+bool DocumentTab::fillField(int page, int index, const std::function<bool(pdfz::Document&)>& change) {
+  QString label = tr("Fill In Form");
+  for (const pdfz::FormField& f : *fields_.get(page))
+    if (f.index == index) label = tr("Fill In %1").arg(fieldLabel(f));
+  if (applyEdit(label, page, Scope::Field, change)) return true;
+  emit statusMessage(tr("That field can't be filled in."), 3000);
+  return false;
+}
+
+void DocumentTab::setFieldText(int page, int index, const QString& text) {
+  const std::string t = text.toStdString();
+  fillField(page, index, [&](pdfz::Document& d) { return d.setFieldText(page, index, t); });
+}
+
+void DocumentTab::setFieldChecked(int page, int index, bool checked) {
+  fillField(page, index, [&](pdfz::Document& d) { return d.setFieldChecked(page, index, checked); });
+}
+
+void DocumentTab::setFieldChoice(int page, int index, int option) {
+  fillField(page, index, [&](pdfz::Document& d) { return d.setFieldChoice(page, index, option); });
+}
 
 void DocumentTab::refreshRendering(int page) {
   annots_.invalidate(page);
@@ -329,12 +399,23 @@ void DocumentTab::resizeAnnotation(int page, int index, const pdfz::RectF& rect)
 void DocumentTab::restyleAnnotation(int page, int index, const StyleChange& change) {
   const pdfz::Annotation* found = annotation(page, index);
   if (!found) return;
-  if (!found->editable()) {
+  if (!found->editable() && !isMark(*found)) {
     emit statusMessage(tr("This kind of comment can't be restyled here."), 3000);
     return;
   }
   pdfz::Annotation a = *found;
   applyStyleChange(a, change);
+  if (isMark(a)) {  // a check mark, cross or dot: drawn again in the new color
+    if (!change.color) return;
+    int now = -1;
+    applyEdit(styleChangeLabel(change), page, Scope::Annotations, [&](pdfz::Document& d) {
+      if (!d.removeAnnotation(page, index)) return false;
+      now = d.addStamp(page, a, markDrawing(a.subject, toQColor(a.color)));
+      return now >= 0;
+    });
+    if (now >= 0) view_->selectAnnotation(page, now, false);
+    return;
+  }
   if (a.kind == pdfz::AnnotKind::FreeText) a.appearance = freeTextAppearance(a, doc_->pageFrame(page));
   int now = -1;
   applyEdit(styleChangeLabel(change), page, Scope::Annotations, [&](pdfz::Document& d) {

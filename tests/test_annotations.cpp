@@ -400,6 +400,62 @@ TEST_CASE("restyling a text box after it's made: opacity and fill stick") {
   CHECK(countColor(*saved, {30, 30, 200, 70}, {255, 255, 64}, 30) > 3000);
 }
 
+TEST_CASE("stamps: drawn outlines and an image, moved and resized") {
+  auto doc = blank(300, 400);
+  // A drawing 100 x 50: a filled square at its right end (75..95 x 15..35), and an image of the
+  // whole box that is clear except for a blue middle third.
+  pdfz::StampDrawing d;
+  d.width = 100;
+  d.height = 50;
+  pdfz::StampDrawing::Path sq;
+  sq.color = {0, 160, 0};
+  using Op = pdfz::StampDrawing::Op;
+  sq.ops = {{Op::MoveTo, {{75, 15}}}, {Op::LineTo, {{95, 15}}}, {Op::LineTo, {{95, 35}}}, {Op::LineTo, {{75, 35}}},
+            {Op::Close, {}}};
+  d.paths.push_back(sq);
+  d.imageWidth = 30;
+  d.imageHeight = 15;
+  d.imageBgra.assign(std::size_t(30 * 15 * 4), 0);
+  for (int y = 0; y < 15; ++y)
+    for (int x = 10; x < 20; ++x) {
+      std::uint8_t* px = &d.imageBgra[std::size_t((y * 30 + x) * 4)];
+      px[0] = 255;
+      px[3] = 255;
+    }
+  Annotation a;
+  a.kind = AnnotKind::Stamp;
+  a.subject = "Signature";
+  a.author = "Corey";
+  a.rect = {50, 100, 150, 150};
+  const int index = doc->addStamp(0, a, d);
+  REQUIRE(index == 0);
+  auto check = [&](const Document& dd, const RectF& r) {
+    // The square, the blue band, and nothing (clear image) on the left.
+    auto at = [&](double fx, double fy) { return RectF{r.left + fx * r.width() - 2, r.top + fy * r.height() - 2,
+                                                       r.left + fx * r.width() + 2, r.top + fy * r.height() + 2}; };
+    CHECK(countColor(dd, at(0.85, 0.5), {0, 160, 0}, 40) >= 9);
+    CHECK(countColor(dd, at(0.5, 0.5), {0, 0, 255}, 40) >= 9);
+    CHECK(countColor(dd, at(0.15, 0.5), {255, 255, 255}, 10) >= 9);
+  };
+  check(*doc, a.rect);
+  auto saved = reopen(*doc);
+  check(*saved, a.rect);
+  const auto listed = saved->annotations(0).at(0);
+  CHECK(listed.kind == AnnotKind::Stamp);
+  CHECK(listed.subject == "Signature");
+  CHECK(listed.isPdfzStamp());
+  CHECK(nearRect(listed.rect, a.rect));
+
+  // Moved, then resized to twice the size: the drawing goes along and scales.
+  REQUIRE(saved->moveAnnotation(0, 0, 20, 30));
+  Annotation b = saved->annotations(0).at(0);
+  CHECK(nearRect(b.rect, {70, 130, 170, 180}));
+  b.rect = {70, 130, 270, 230};
+  REQUIRE(saved->updateAnnotation(0, 0, b) == 0);
+  check(*saved, b.rect);
+  check(*reopen(*saved), b.rect);
+}
+
 TEST_CASE("hiding an annotation while it's edited") {
   auto doc = blank();
   Annotation sq;

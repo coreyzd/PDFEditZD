@@ -9,6 +9,7 @@
 #include <QLocale>
 #include <QObject>
 #include <QPainterPath>
+#include <QPainterPathStroker>
 #include <QSettings>
 #include <QTextLayout>
 
@@ -91,7 +92,8 @@ int annotationAt(const AnnotationList& list, double x, double y, double toleranc
 bool canMove(const pdfz::Annotation& a) { return !pdfz::isTextMarkup(a.kind); }
 
 bool canResize(const pdfz::Annotation& a) {
-  return a.kind == pdfz::AnnotKind::Square || a.kind == pdfz::AnnotKind::Circle || a.kind == pdfz::AnnotKind::FreeText;
+  return a.kind == pdfz::AnnotKind::Square || a.kind == pdfz::AnnotKind::Circle || a.kind == pdfz::AnnotKind::FreeText ||
+         a.isPdfzStamp();
 }
 
 QString toolName(MarkupTool t) {
@@ -106,13 +108,19 @@ QString toolName(MarkupTool t) {
     case MarkupTool::Ellipse: return QObject::tr("Ellipse");
     case MarkupTool::Line: return QObject::tr("Line");
     case MarkupTool::Arrow: return QObject::tr("Arrow");
+    case MarkupTool::FillText: return QObject::tr("Add Text");
+    case MarkupTool::Check: return QObject::tr("Checkmark");
+    case MarkupTool::Cross: return QObject::tr("Cross");
+    case MarkupTool::Dot: return QObject::tr("Dot");
+    case MarkupTool::Date: return QObject::tr("Date");
   }
   return {};
 }
 
 QString toolKey(MarkupTool t) {
   static const char* const keys[] = {"highlight", "underline", "strikeout", "note", "textbox",
-                                     "pen", "rectangle", "ellipse", "line", "arrow"};
+                                     "pen", "rectangle", "ellipse", "line", "arrow",
+                                     "filltext", "check", "cross", "dot", "date"};
   return QLatin1String(keys[int(t)]);
 }
 
@@ -129,6 +137,16 @@ MarkupStyle defaultStyle(MarkupTool t) {
     case MarkupTool::Note: s.color = QColor(0xFF, 0xD4, 0x00); s.width = 1; break;
     case MarkupTool::TextBox: s.width = 1; break;  // red text in a thin red box, like Acrobat's
     case MarkupTool::Pen: s.color = QColor(0x1A, 0x5F, 0xD0); break;
+    // Fill & Sign: black, and text as if typed on the form (no box).
+    case MarkupTool::FillText:
+    case MarkupTool::Date:
+      s.color = s.textColor = Qt::black;
+      s.width = 0;
+      s.fontSize = 11;
+      break;
+    case MarkupTool::Check:
+    case MarkupTool::Cross:
+    case MarkupTool::Dot: s.color = Qt::black; break;
     default: break;  // shapes and lines
   }
   return s;
@@ -243,7 +261,81 @@ bool usesWidth(MarkupTool t) {
   return t == MarkupTool::Pen || t == MarkupTool::Rectangle || t == MarkupTool::Ellipse || t == MarkupTool::Line ||
          t == MarkupTool::Arrow || t == MarkupTool::TextBox;
 }
-bool usesText(MarkupTool t) { return t == MarkupTool::TextBox; }
+bool usesText(MarkupTool t) { return t == MarkupTool::TextBox || t == MarkupTool::FillText || t == MarkupTool::Date; }
+bool usesOpacity(MarkupTool t) { return !markSubject(t); }
+bool usesOpacity(const pdfz::Annotation& a) { return a.kind != pdfz::AnnotKind::Stamp; }
+
+bool isMark(const pdfz::Annotation& a) {
+  return a.kind == pdfz::AnnotKind::Stamp && (a.subject == "Check" || a.subject == "Cross" || a.subject == "Dot");
+}
+
+const char* markSubject(MarkupTool t) {
+  switch (t) {
+    case MarkupTool::Check: return "Check";
+    case MarkupTool::Cross: return "Cross";
+    case MarkupTool::Dot: return "Dot";
+    default: return nullptr;
+  }
+}
+
+double markSize(MarkupTool t) { return t == MarkupTool::Dot ? 7 : 14; }
+
+pdfz::StampDrawing::Path stampPath(const QPainterPath& path, const QColor& color) {
+  using Op = pdfz::StampDrawing::Op;
+  pdfz::StampDrawing::Path out;
+  out.color = fromQColor(color);
+  for (int i = 0; i < path.elementCount(); ++i) {
+    const QPainterPath::Element e = path.elementAt(i);
+    Op op;
+    if (e.isMoveTo()) {
+      op.kind = Op::MoveTo;
+      op.p[0] = {e.x, e.y};
+    } else if (e.isLineTo()) {
+      op.kind = Op::LineTo;
+      op.p[0] = {e.x, e.y};
+    } else if (e.isCurveTo() && i + 2 < path.elementCount()) {
+      op.kind = Op::CubicTo;
+      const QPainterPath::Element c2 = path.elementAt(i + 1), end = path.elementAt(i + 2);
+      op.p[0] = {e.x, e.y};
+      op.p[1] = {c2.x, c2.y};
+      op.p[2] = {end.x, end.y};
+      i += 2;
+    } else {
+      continue;
+    }
+    out.ops.push_back(op);
+  }
+  return out;
+}
+
+pdfz::StampDrawing markDrawing(const std::string& subject, const QColor& color) {
+  // In a 100 x 100 box; strokes become outlines, so they scale with the mark.
+  QPainterPath shape;
+  if (subject == "Dot") {
+    shape.addEllipse(QPointF(50, 50), 44, 44);
+  } else {
+    QPainterPath line;
+    if (subject == "Check") {
+      line.moveTo(10, 55);
+      line.lineTo(38, 84);
+      line.lineTo(90, 14);
+    } else {  // Cross
+      line.moveTo(16, 16);
+      line.lineTo(84, 84);
+      line.moveTo(84, 16);
+      line.lineTo(16, 84);
+    }
+    QPainterPathStroker stroker;
+    stroker.setWidth(14);
+    stroker.setCapStyle(Qt::RoundCap);
+    stroker.setJoinStyle(Qt::RoundJoin);
+    shape = stroker.createStroke(line);
+  }
+  pdfz::StampDrawing d;
+  d.width = d.height = 100;
+  d.paths.push_back(stampPath(shape, color));
+  return d;
+}
 bool usesFill(const pdfz::Annotation& a) {
   return a.kind == pdfz::AnnotKind::Square || a.kind == pdfz::AnnotKind::Circle || a.kind == pdfz::AnnotKind::FreeText;
 }

@@ -74,6 +74,28 @@ struct Annotation {
 
   // pdfz can add this kind, and move and restyle it.
   bool editable() const;
+  // A stamp pdfz made (a signature, initials, a check mark...): it can be moved and resized.
+  bool isPdfzStamp() const { return kind == AnnotKind::Stamp && !subject.empty(); }
+};
+
+// What a stamp shows (Document::addStamp): filled outlines and an image, drawn in a box of the
+// drawing's own (`width` by `height`, y downwards) that is fitted to the annotation's rect.
+// Signatures and initials are drawn strokes made into outlines, typed names as glyph outlines,
+// or an image; check marks, crosses and dots are outlines.
+struct StampDrawing {
+  struct Op {
+    enum Kind { MoveTo, LineTo, CubicTo, Close } kind = MoveTo;
+    PointF p[3];  // MoveTo/LineTo: p[0]; CubicTo: the two control points, then the end
+  };
+  struct Path {
+    std::vector<Op> ops;  // filled with the nonzero winding rule
+    Color color{0, 0, 0};
+  };
+  double width = 1, height = 1;
+  std::vector<Path> paths;
+  // An image over the whole box (under the paths): BGRA with straight alpha, top row first.
+  int imageWidth = 0, imageHeight = 0;
+  std::vector<std::uint8_t> imageBgra;
 };
 
 // "D:YYYYMMDDHHmmSS+HH'mm'" for now, in local time.

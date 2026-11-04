@@ -67,6 +67,8 @@ class Document;
 struct PageText;
 struct PageFrame;
 struct Annotation;
+struct FormField;
+struct StampDrawing;
 
 // The complete bytes of a PDF file, shared without copying (an open document keeps its file's
 // bytes; undo snapshots are these too).
@@ -134,9 +136,27 @@ public:
   // Hides or shows an annotation (its Hidden flag), e.g. while it's being edited in place.
   // Not an edit: snapshot() ignores it while the document is otherwise unedited.
   bool setAnnotationHidden(int page, int index, bool hidden);
+  // A stamp (a signature, initials, a check mark...): `a` gives its rect, subject, author and
+  // contents; `drawing` what it shows, scaled to the rect. Returns its index, or -1. Moving and
+  // resizing it afterwards (moveAnnotation, updateAnnotation with a new rect) keeps the
+  // drawing, scaled to fit.
+  int addStamp(int page, const Annotation& a, const StampDrawing& drawing);
+
+  // Form fields (forms.hpp): the widgets on a page, and filling them in. The setters refuse
+  // read-only fields. A field's value is shared by all its widgets (a radio group's buttons,
+  // or a field shown on several pages).
+  bool hasForm() const;
+  std::vector<FormField> formFields(int page) const;
+  bool setFieldText(int page, int index, const std::string& text);
+  // A check box on or off; a radio button on (it turns its group's others off).
+  bool setFieldChecked(int page, int index, bool checked);
+  // Selects option `option` of a combo box or list box (for a multiple-selection list, only it).
+  bool setFieldChoice(int page, int index, int option);
 
   // Page editing. Indices are 0-based; each returns false (and changes nothing) on bad input.
   bool deletePage(int index);
+  // Deletes several pages at once (distinct; not all of them).
+  bool deletePages(std::vector<int> pages);
   // A blank page that becomes page `index` (index == pageCount() appends).
   bool insertBlankPage(int index, SizeF size);
   // Copies `pages` of `source` (in that order) so they start at `index` here. `source` may not
@@ -149,10 +169,18 @@ public:
   // Sets /Rotate (0, 90, 180 or 270, anything else rounds to those).
   bool setPageRotation(int index, int degrees);
 
+  // A new document of just `pages` of this one, in that order (extracting, splitting). Made
+  // from a copy of the whole file with the other pages taken out, so form fields, bookmarks'
+  // targets on those pages and the document's settings come along. Null on bad input.
+  std::unique_ptr<Document> extract(const std::vector<int>& pages) const;
+
   // Writes a complete new copy of the document. Saves to a temporary file next to `path` and
   // then replaces `path`, so a failed save never leaves a half-written file behind.
   bool save(const std::filesystem::path& path) const;
   std::vector<std::uint8_t> saveToMemory() const;
+  // Saves a copy in which comments, signatures and filled-in form fields are part of the page
+  // content: they can't be moved or changed any more. This document stays as it is.
+  bool saveFlattened(const std::filesystem::path& path) const;
   // The document as it is now, as the bytes of a PDF: the bytes it was opened from while it is
   // unedited (no copy), otherwise a fresh save. Empty if saving fails.
   Bytes snapshot() const;
@@ -178,10 +206,18 @@ private:
   // parsed. Owned by the cache; valid until the next call that changes the page list.
   void* cachedPage(int index) const;
   void dropCachedPages() const;
+  // PDFium's form-fill environment, which form fields need to be drawn and filled in. Made
+  // again after the page list changes, so it knows the fields of imported pages.
+  void initForms();
+  void exitForms();
+  void closePage(void* page) const;
   // Has PDFium store appearances for the annotations changed since the last save.
   void flushAppearances() const;
 
   void* doc_ = nullptr;  // FPDF_DOCUMENT
+  void* form_ = nullptr;  // FPDF_FORMHANDLE
+  void* formInfo_ = nullptr;  // FPDF_FORMFILLINFO, which must outlive form_
+  bool hasForm_ = false;
   Bytes bytes_;  // must outlive doc_: PDFium reads from it lazily
   std::string password_;
   bool edited_ = false;  // changed since it was opened (unlike modified_, saving doesn't reset it)

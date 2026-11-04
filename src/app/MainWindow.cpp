@@ -5,6 +5,7 @@
 #include "DocumentTab.hpp"
 #include "FindBar.hpp"
 #include "Printing.hpp"
+#include "SignatureDialog.hpp"
 #include "TextSearch.hpp"
 #include "ThumbnailPanel.hpp"
 #include "ToolIcons.hpp"
@@ -19,12 +20,17 @@
 #include <QClipboard>
 #include <QCloseEvent>
 #include <QColorDialog>
+#include <QCheckBox>
 #include <QComboBox>
+#include <QDialogButtonBox>
+#include <QFormLayout>
 #include <QDockWidget>
 #include <QDragEnterEvent>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QImageReader>
 #include <QInputDialog>
+#include <QPainter>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
@@ -33,6 +39,7 @@
 #include <QMessageBox>
 #include <QMimeData>
 #include <QPushButton>
+#include <QRegularExpression>
 #include <QSettings>
 #include <QShortcut>
 #include <QSpinBox>
@@ -47,6 +54,7 @@
 #include <QToolBar>
 #include <QToolButton>
 #include <QVBoxLayout>
+#include <QWidgetAction>
 
 #include <algorithm>
 #include <cmath>
@@ -82,6 +90,29 @@ QString describePages(const std::vector<int>& pages) {
     i = j + 1;
   }
   return parts.join(QStringLiteral(", "));
+}
+
+// "1-3, 5, 8-" (1-based, "8-" to the end) as 0-based page indices in the order given, each
+// once; empty if it isn't a list of pages of a `count`-page document.
+std::vector<int> parsePages(const QString& text, int count) {
+  std::vector<int> out;
+  std::vector<bool> seen(std::size_t(std::max(0, count)), false);
+  const QStringList parts = text.split(QRegularExpression(QStringLiteral("[,;\\s]+")), Qt::SkipEmptyParts);
+  for (const QString& part : parts) {
+    const QRegularExpressionMatch m =
+        QRegularExpression(QStringLiteral("^(\\d*)\\s*(?:[-\u2013]\\s*(\\d*))?$")).match(part);
+    if (!m.hasMatch() || (m.captured(1).isEmpty() && m.captured(2).isEmpty())) return {};
+    const bool range = part.contains('-') || part.contains(QChar(0x2013));
+    const int a = m.captured(1).isEmpty() ? 1 : m.captured(1).toInt();
+    const int b = !range ? a : m.captured(2).isEmpty() ? count : m.captured(2).toInt();
+    if (a < 1 || b < 1 || a > count || b > count) return {};
+    for (int p = a; a <= b ? p <= b : p >= b; p += a <= b ? 1 : -1)
+      if (!seen[std::size_t(p - 1)]) {
+        seen[std::size_t(p - 1)] = true;
+        out.push_back(p - 1);
+      }
+  }
+  return out;
 }
 
 struct PresetColor {
@@ -250,6 +281,9 @@ void MainWindow::connectTab(DocumentTab* t) {
   connect(v, &DocumentView::textEditFinished, this, [this, t] {
     if (t == tab()) updateStyleControls();
   });
+  connect(v, &DocumentView::signatureFieldClicked, this,
+          [this, t](int page, const pdfz::RectF& rect) { signField(t, page, rect); });
+  v->setHighlightFields(highlightFieldsAct_->isChecked());
   // Esc, again and again: out of the drag, the selection, and back to the Select tool.
   connect(v, &DocumentView::toolResetRequested, this, [this, t] {
     if (t == tab() && !selectToolAct_->isChecked()) selectToolAct_->trigger();
@@ -385,7 +419,10 @@ void MainWindow::createActions() {
       tr("Strikethrough: drag over text"),      tr("Sticky note: click where it goes"),
       tr("Text box: click, or drag out a box"), tr("Pen: draw freehand"),
       tr("Rectangle: drag out a rectangle"),    tr("Ellipse: drag out an ellipse"),
-      tr("Line: drag from end to end"),         tr("Arrow: drag from the tail to the tip")};
+      tr("Line: drag from end to end"),         tr("Arrow: drag from the tail to the tip"),
+      tr("Add text: click where it goes, and type"), tr("Checkmark: click where it goes"),
+      tr("Cross: click where it goes"),         tr("Dot: click where it goes"),
+      tr("Today's date: click where it goes")};
   for (int i = 0; i < kMarkupToolCount; ++i) {
     const MarkupTool tool = MarkupTool(i);
     auto* a = new QAction(toolIcon(tool, palette()), toolName(tool), this);
@@ -394,6 +431,41 @@ void MainWindow::createActions() {
     toolGroup_->addAction(a);
     markupActs_[std::size_t(i)] = a;
   }
+  // Sign: checked while a signature waits to be placed (sign() checks it).
+  signAct_ = new QAction(signIcon(palette()), tr("&Sign"), this);
+  signAct_->setCheckable(true);
+  signAct_->setToolTip(tr("Sign: place your signature with a click (the arrow: other signatures, initials)"));
+  toolGroup_->addAction(signAct_);
+  connect(signAct_, &QAction::triggered, this, [this] {
+    const QList<Signature> saved = SignatureStore::load();
+    std::optional<Signature> first;
+    for (const Signature& s : saved)
+      if (!s.initials) {
+        first = s;
+        break;
+      }
+    sign(first, false);
+  });
+
+  // Stamp: checked while a stamp waits to be placed.
+  stampAct_ = new QAction(stampIcon(palette()), tr("S&tamp"), this);
+  stampAct_->setCheckable(true);
+  stampAct_->setToolTip(tr("Stamps: Approved, Draft, Confidential... and your own pictures"));
+  toolGroup_->addAction(stampAct_);
+
+  saveFlatAct_ = new QAction(tr("Save as &Flattened…"), this);
+  saveFlatAct_->setToolTip(tr("Save a copy in which comments, signatures and form fields can't be changed"));
+  connect(saveFlatAct_, &QAction::triggered, this, &MainWindow::saveFlattened);
+
+  highlightFieldsAct_ = new QAction(tr("&Highlight Form Fields"), this);
+  highlightFieldsAct_->setCheckable(true);
+  highlightFieldsAct_->setChecked(QSettings().value("forms/highlight", true).toBool());
+  connect(highlightFieldsAct_, &QAction::toggled, this, [this](bool on) {
+    QSettings().setValue("forms/highlight", on);
+    for (int i = 0; i < tabs_->count(); ++i)
+      if (auto* t = qobject_cast<DocumentTab*>(tabs_->widget(i))) t->view()->setHighlightFields(on);
+  });
+
   connect(toolGroup_, &QActionGroup::triggered, this, [this](QAction* picked) {
     // Another tool: the typing in a text box is over (the Select tool is where typing goes on).
     if (picked != selectToolAct_)
@@ -415,6 +487,12 @@ void MainWindow::createActions() {
   deletePagesAct_ = new QAction(themeIcon("edit-delete"), tr("&Delete Pages"), this);
   deletePagesAct_->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_D));
   connect(deletePagesAct_, &QAction::triggered, this, &MainWindow::deletePages);
+  extractAct_ = new QAction(tr("&Extract Pages…"), this);
+  extractAct_->setToolTip(tr("Save some pages as a new PDF"));
+  connect(extractAct_, &QAction::triggered, this, &MainWindow::extractPages);
+  splitAct_ = new QAction(tr("S&plit Document…"), this);
+  splitAct_->setToolTip(tr("Save the document as several PDFs of so many pages each"));
+  connect(splitAct_, &QAction::triggered, this, &MainWindow::splitDocument);
   insertBlankAct_ = new QAction(tr("Insert &Blank Page"), this);
   connect(insertBlankAct_, &QAction::triggered, this, &MainWindow::insertBlankPage);
   insertFileAct_ = new QAction(tr("Insert Pages from &File…"), this);
@@ -486,6 +564,7 @@ void MainWindow::createMenus() {
   file->addSeparator();
   file->addAction(saveAct_);
   file->addAction(saveAsAct_);
+  file->addAction(saveFlatAct_);
   file->addSeparator();
   file->addAction(printAct_);
   file->addSeparator();
@@ -504,9 +583,11 @@ void MainWindow::createMenus() {
   edit->addAction(findPrevAct_);
 
   QMenu* comment = menuBar()->addMenu(tr("&Comment"));
-  for (QAction* a : markupActs_) comment->addAction(a);
+  for (int i = 0; i < kCommentToolCount; ++i) comment->addAction(markupActs_[std::size_t(i)]);
   comment->insertSeparator(markupActs_[std::size_t(MarkupTool::Note)]);
   comment->insertSeparator(markupActs_[std::size_t(MarkupTool::Pen)]);
+  QMenu* stamps = comment->addMenu(tr("S&tamps"));
+  connect(stamps, &QMenu::aboutToShow, this, [this, stamps] { fillStampMenu(stamps); });
   comment->addSeparator();
   comment->addAction(highlightSelAct_);
   comment->addAction(underlineSelAct_);
@@ -514,12 +595,26 @@ void MainWindow::createMenus() {
   comment->addSeparator();
   comment->addAction(authorAct_);
 
+  QMenu* fill = menuBar()->addMenu(tr("F&ill && Sign"));
+  for (int i = kCommentToolCount; i < kMarkupToolCount; ++i) fill->addAction(markupActs_[std::size_t(i)]);
+  fill->addSeparator();
+  signMenu_ = new QMenu(tr("&Sign"), this);
+  signMenu_->setIcon(signIcon(palette()));
+  connect(signMenu_, &QMenu::aboutToShow, this, [this] { fillSignMenu(signMenu_); });
+  fill->addMenu(signMenu_);
+  fill->addSeparator();
+  fill->addAction(highlightFieldsAct_);
+  fill->addAction(saveFlatAct_);
+
   pagesMenu_ = menuBar()->addMenu(tr("&Pages"));
   pagesMenu_->addAction(insertBlankAct_);
   pagesMenu_->addAction(insertFileAct_);
   pagesMenu_->addSeparator();
   pagesMenu_->addAction(rotateCwAct_);
   pagesMenu_->addAction(rotateCcwAct_);
+  pagesMenu_->addSeparator();
+  pagesMenu_->addAction(extractAct_);
+  pagesMenu_->addAction(splitAct_);
   pagesMenu_->addSeparator();
   pagesMenu_->addAction(deletePagesAct_);
 
@@ -596,15 +691,38 @@ void MainWindow::createToolBars() {
   tb->addSeparator();
   tb->addAction(findAct_);
 
+  // Fill & Sign, beside the main tools.
+  fillBar_ = addToolBar(tr("Fill && Sign"));
+  fillBar_->setObjectName("fillSignToolBar");
+  fillBar_->setMovable(false);
+  for (int i = kCommentToolCount; i < kMarkupToolCount; ++i) fillBar_->addAction(markupActs_[std::size_t(i)]);
+  fillBar_->addSeparator();
+  auto* signButton = new QToolButton(this);
+  signButton->setDefaultAction(signAct_);
+  signButton->setPopupMode(QToolButton::MenuButtonPopup);
+  signButton->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+  auto* signDrop = new QMenu(signButton);
+  connect(signDrop, &QMenu::aboutToShow, this, [this, signDrop] { fillSignMenu(signDrop); });
+  signButton->setMenu(signDrop);
+  fillBar_->addWidget(signButton);
+
   // The comment tools, on their own row.
   addToolBarBreak();
   markupBar_ = addToolBar(tr("Comment Tools"));
   markupBar_->setObjectName("commentToolBar");
   markupBar_->setMovable(false);
-  for (int i = 0; i < kMarkupToolCount; ++i) {
+  for (int i = 0; i < kCommentToolCount; ++i) {
     if (i == int(MarkupTool::Note) || i == int(MarkupTool::Pen)) markupBar_->addSeparator();
     markupBar_->addAction(markupActs_[std::size_t(i)]);
   }
+  auto* stampButton = new QToolButton(this);
+  stampButton->setDefaultAction(stampAct_);
+  stampButton->setPopupMode(QToolButton::InstantPopup);
+  auto* stampMenu = new QMenu(stampButton);
+  connect(stampMenu, &QMenu::aboutToShow, this, [this, stampMenu] { fillStampMenu(stampMenu); });
+  stampButton->setMenu(stampMenu);
+  markupBar_->addWidget(stampButton);
+
   // The style of the selected comment (or the box being typed in, or what the tool makes
   // next). None of these take the keyboard, so typing in a text box carries on after using them.
   markupBar_->addSeparator();
@@ -675,6 +793,9 @@ void MainWindow::createToolBars() {
   QAction* toggle = markupBar_->toggleViewAction();
   toggle->setText(tr("Comment &Tools"));
   viewMenu_->insertAction(nextTabAct_, toggle);
+  QAction* toggleFill = fillBar_->toggleViewAction();
+  toggleFill->setText(tr("&Fill && Sign Tools"));
+  viewMenu_->insertAction(nextTabAct_, toggleFill);
   viewMenu_->insertSeparator(nextTabAct_);
 }
 
@@ -731,6 +852,12 @@ void MainWindow::updateUi() {
                      nextPageAct_, zoomInAct_, zoomOutAct_, selectAllAct_, findAct_, findNextAct_, findPrevAct_})
     a->setEnabled(has);
   for (QAction* a : markupActs_) a->setEnabled(has);
+  signAct_->setEnabled(has);
+  stampAct_->setEnabled(has);
+  extractAct_->setEnabled(has);
+  splitAct_->setEnabled(has && t->document()->pageCount() > 1);
+  signMenu_->setEnabled(has);
+  saveFlatAct_->setEnabled(has);
   const bool sel = has && t->view()->hasSelection();
   for (QAction* a : {copyAct_, highlightSelAct_, underlineSelAct_, strikeSelAct_}) a->setEnabled(sel);
   static const pdfz::EditHistory none;
@@ -841,7 +968,10 @@ bool MainWindow::openFile(const QString& path) {
   tabs_->setCurrentWidget(t);
   onCurrentTabChanged();
   const QString title = QString::fromStdString(t->document()->metadata("Title")).trimmed();
-  if (!title.isEmpty()) statusBar()->showMessage(title, 5000);
+  if (t->hasForm())
+    statusBar()->showMessage(tr("This document has form fields: click one to fill it in, Tab to go to the next"), 8000);
+  else if (!title.isEmpty())
+    statusBar()->showMessage(title, 5000);
   addRecent(abs);
   rememberDir(abs);
   t->view()->setFocus();
@@ -988,11 +1118,7 @@ void MainWindow::deletePages() {
   }
   const QString which = pages.size() == 1 ? tr("page %1").arg(pages[0] + 1) : tr("pages %1").arg(describePages(pages));
   if (t->applyEdit(pages.size() == 1 ? tr("Delete Page") : tr("Delete Pages"), pages.front(), DocumentTab::Scope::Pages,
-                   [&](pdfz::Document& d) {
-                     bool any = false;
-                     for (auto it = pages.rbegin(); it != pages.rend(); ++it) any = d.deletePage(*it) || any;
-                     return any;
-                   }))
+                   [&](pdfz::Document& d) { return d.deletePages(pages); }))
     statusBar()->showMessage(tr("Deleted %1 (Ctrl+Z to undo)").arg(which), 4000);
 }
 
@@ -1026,7 +1152,8 @@ void MainWindow::insertPagesFromFile() {
     QMessageBox::warning(this, tr("Insert Pages"), tr("Couldn't insert the pages of %1.").arg(QFileInfo(path).fileName()));
     return;
   }
-  statusBar()->showMessage(tr("Inserted %n page(s) from %1", nullptr, int(all.size())).arg(QFileInfo(path).fileName()), 4000);
+  statusBar()->showMessage((all.size() == 1 ? tr("Inserted 1 page from %1").arg(QFileInfo(path).fileName())
+                                             : tr("Inserted %1 pages from %2").arg(all.size()).arg(QFileInfo(path).fileName())), 4000);
 }
 
 void MainWindow::rotatePages(int degrees) {
@@ -1055,7 +1182,7 @@ void MainWindow::copySelection() {
   const QString text = t->view()->selectedText();
   if (text.isEmpty()) return;
   QGuiApplication::clipboard()->setText(text);
-  statusBar()->showMessage(tr("Copied %n character(s)", nullptr, int(text.size())), 2000);
+  statusBar()->showMessage((text.size() == 1 ? tr("Copied 1 character") : tr("Copied %1 characters").arg(text.size())), 2000);
 }
 
 void MainWindow::showFind() {
@@ -1152,6 +1279,10 @@ void MainWindow::applyTool() {
     v->setTool(DocumentView::Tool::Hand);
     return;
   }
+  if (signAct_->isChecked() || stampAct_->isChecked()) {
+    if (v->tool() != DocumentView::Tool::Place) selectToolAct_->trigger();  // e.g. another tab's placing
+    return;
+  }
   for (int i = 0; i < kMarkupToolCount; ++i)
     if (markupActs_[std::size_t(i)]->isChecked()) {
       v->setMarkupTool(MarkupTool(i), styles_[std::size_t(i)]);
@@ -1189,7 +1320,7 @@ void MainWindow::changeStyle(const StyleChange& change) {
 void MainWindow::updateStyleControls() {
   DocumentTab* t = tab();
   std::optional<MarkupStyle> st;
-  bool fill = false, width = false, text = false;
+  bool fill = false, width = false, text = false, opacity = true;
   if (t && t->hasDocument()) {
     DocumentView* v = t->view();
     int page, index;
@@ -1197,11 +1328,12 @@ void MainWindow::updateStyleControls() {
       st = styleOf(*e);
       fill = width = text = true;
     } else if (v->selectedAnnotation(page, index)) {
-      if (const pdfz::Annotation* a = t->annotation(page, index); a && a->editable()) {
+      if (const pdfz::Annotation* a = t->annotation(page, index); a && (a->editable() || isMark(*a))) {
         st = styleOf(*a);
         fill = usesFill(*a);
         width = usesWidth(*a);
         text = usesText(*a);
+        opacity = usesOpacity(*a);
       }
     } else if (v->tool() == DocumentView::Tool::Markup) {
       const MarkupTool tool = v->markupTool();
@@ -1209,14 +1341,15 @@ void MainWindow::updateStyleControls() {
       fill = usesFill(tool);
       width = usesWidth(tool);
       text = usesText(tool);
+      opacity = usesOpacity(tool);
     }
   }
   colorButton_->setEnabled(st.has_value());
   colorButton_->setIcon(strokeColorIcon(st ? st->color : QColor(), palette()));
   fillButton_->setEnabled(st && fill);
   fillButton_->setIcon(fillColorIcon(st && fill ? st->fill : QColor(), palette()));
-  opacityCombo_->setEnabled(st.has_value());
-  opacityCombo_->setCurrentIndex(st ? nearestItem(opacityCombo_, st->opacity) : -1);
+  opacityCombo_->setEnabled(st && opacity);
+  opacityCombo_->setCurrentIndex(st && opacity ? nearestItem(opacityCombo_, st->opacity) : -1);
   widthCombo_->setEnabled(st && width);
   if (auto* model = qobject_cast<QStandardItemModel*>(widthCombo_->model()))
     if (QStandardItem* none = model->item(0)) none->setEnabled(text);  // only a text box can do without
@@ -1261,7 +1394,13 @@ void MainWindow::showViewMenu(DocumentTab* t, const QPoint& globalPos, int page,
   if (annotIndex >= 0) {
     const pdfz::Annotation* a = t->annotation(page, annotIndex);
     const bool textBox = a && a->kind == pdfz::AnnotKind::FreeText;
-    menu.addAction(textBox ? tr("Edit Text") : tr("Edit Comment Text…"), this, [=] { t->editAnnotation(page, annotIndex); });
+    if (a && a->kind != pdfz::AnnotKind::Stamp)
+      menu.addAction(textBox ? tr("Edit Text") : tr("Edit Comment Text…"), this, [=] { t->editAnnotation(page, annotIndex); });
+    if (a && isMark(*a)) {
+      QMenu* colors = colorMenu(&menu, {}, [=](const QColor& c) { t->restyleAnnotation(page, annotIndex, StyleChange{.color = c}); });
+      colors->setTitle(tr("Color"));
+      menu.addMenu(colors);
+    }
     if (a && a->editable()) {
       auto restyle = [=](StyleChange c) { t->restyleAnnotation(page, annotIndex, c); };
       QMenu* colors = colorMenu(&menu, {}, [=](const QColor& c) { restyle(StyleChange{.color = c}); });
@@ -1285,7 +1424,8 @@ void MainWindow::showViewMenu(DocumentTab* t, const QPoint& globalPos, int page,
       }
     }
     menu.addSeparator();
-    menu.addAction(tr("Delete Comment"), this, [=] { t->deleteAnnotation(page, annotIndex); });
+    menu.addAction(a && a->kind == pdfz::AnnotKind::Stamp ? tr("Delete") : tr("Delete Comment"), this,
+                   [=] { t->deleteAnnotation(page, annotIndex); });
   } else {
     menu.addAction(copyAct_);
     menu.addSeparator();
@@ -1304,4 +1444,378 @@ void MainWindow::setAuthor() {
                                              tr("Name written on your comments (empty for your login name):"),
                                              QLineEdit::Normal, QSettings().value("comments/author").toString(), &ok);
   if (ok) setCommentAuthor(name);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Fill & Sign
+
+void MainWindow::fillSignMenu(QMenu* menu) {
+  menu->clear();
+  const QList<Signature> saved = SignatureStore::load();
+  const qreal dpr = devicePixelRatioF();
+  // Saved ones as themselves, big enough to tell apart (menu icons are tiny).
+  auto addSaved = [&](bool initials) {
+    for (const Signature& s : saved) {
+      if (s.initials != initials) continue;
+      const QSize box = initials ? QSize(70, 34) : QSize(170, 40);
+      auto* button = new QToolButton(menu);
+      button->setAutoRaise(true);
+      button->setIconSize(box);
+      button->setIcon(QIcon(QPixmap::fromImage(s.preview(box, dpr))));
+      button->setToolTip(initials ? tr("Place these initials") : tr("Place this signature"));
+      button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+      auto* action = new QWidgetAction(menu);
+      action->setDefaultWidget(button);
+      connect(button, &QToolButton::clicked, this, [this, menu, s] {
+        menu->close();
+        sign(s, s.initials);
+      });
+      menu->addAction(action);
+    }
+  };
+  addSaved(false);
+  menu->addAction(tr("Add Signature…"), this, [this] { sign(std::nullopt, false); });
+  menu->addSeparator();
+  addSaved(true);
+  menu->addAction(tr("Add Initials…"), this, [this] { sign(std::nullopt, true); });
+  if (!saved.isEmpty()) {
+    menu->addSeparator();
+    QMenu* remove = menu->addMenu(tr("Remove Saved"));
+    for (const Signature& s : saved) {
+      QAction* a = remove->addAction(QIcon(QPixmap::fromImage(s.preview(QSize(100, 30), dpr))),
+                                     s.initials ? tr("Initials") : tr("Signature"), this, [this, id = s.id] {
+        SignatureStore::remove(id);
+        statusBar()->showMessage(tr("Removed the saved signature"), 3000);
+      });
+      a->setIconVisibleInMenu(true);
+    }
+  }
+}
+
+std::optional<Signature> MainWindow::newSignature(bool initials) {
+  SignatureDialog dlg(initials, this);
+  if (dlg.exec() != QDialog::Accepted) return std::nullopt;
+  Signature s = dlg.signature();
+  if (s.isEmpty()) return std::nullopt;
+  if (dlg.saveForLater()) SignatureStore::add(s);
+  return s;
+}
+
+void MainWindow::sign(std::optional<Signature> sig, bool initials) {
+  DocumentTab* t = tab();
+  if (!t || !t->hasDocument()) return;
+  if (!sig) sig = newSignature(initials);
+  if (!sig) {
+    if (signAct_->isChecked()) selectToolAct_->trigger();
+    return;
+  }
+  // Its usual size on the page: about a third of an inch tall for a signature, less for
+  // initials, and never wider than a long signature line.
+  const QSizeF size = sig->size();
+  if (size.isEmpty()) return;
+  double h = initials ? 20 : 30;
+  double w = h * size.width() / size.height();
+  const double maxW = initials ? 80 : 200;
+  if (w > maxW) {
+    h *= maxW / w;
+    w = maxW;
+  }
+  pdfz::Annotation a;
+  a.kind = pdfz::AnnotKind::Stamp;
+  a.subject = initials ? "Initials" : "Signature";
+  a.color = fromQColor(sig->color);
+  const QImage preview = sig->preview(QSize(int(w * 4), int(h * 4)));
+  signAct_->setChecked(true);
+  t->view()->startPlacing(a, sig->drawing(), preview, QSizeF(w, h));
+  t->view()->setFocus();
+  statusBar()->showMessage(tr("Click where your %1 goes (Esc to cancel)").arg(initials ? tr("initials") : tr("signature")), 5000);
+  updateStyleControls();
+}
+
+void MainWindow::signField(DocumentTab* t, int page, const pdfz::RectF& rect) {
+  if (t != tab()) return;
+  std::optional<Signature> sig;
+  for (const Signature& s : SignatureStore::load())
+    if (!s.initials) {
+      sig = s;
+      break;
+    }
+  if (!sig) sig = newSignature(false);
+  if (!sig) return;
+  // As big as fits in the field, keeping its shape, in the middle.
+  const QSizeF size = sig->size();
+  if (size.isEmpty() || rect.width() <= 0 || rect.height() <= 0) return;
+  const double k = std::min(rect.width() / size.width(), rect.height() / size.height()) * 0.92;
+  const double w = size.width() * k, h = size.height() * k;
+  pdfz::Annotation a;
+  a.subject = "Signature";
+  a.color = fromQColor(sig->color);
+  const double cx = (rect.left + rect.right) / 2, cy = (rect.top + rect.bottom) / 2;
+  a.rect = {cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2};
+  t->addStamp(page, a, sig->drawing());
+}
+
+void MainWindow::saveFlattened() {
+  DocumentTab* t = tab();
+  if (!t || !t->hasDocument()) return;
+  t->finishTextEditing();
+  QString base = t->path().isEmpty() ? lastDir() + "/Untitled.pdf" : t->path();
+  base = QFileInfo(base).absolutePath() + "/" + QFileInfo(base).completeBaseName() + tr(" (flattened)") + ".pdf";
+  QString path = QFileDialog::getSaveFileName(this, tr("Save as Flattened"), base, tr(kPdfFilter));
+  if (path.isEmpty()) return;
+  if (QFileInfo(path).suffix().isEmpty()) path += ".pdf";
+  if (tabFor(QFileInfo(path).absoluteFilePath())) {
+    QMessageBox::warning(this, tr("Save as Flattened"), tr("%1 is open in a tab. Close it first, or choose another name.")
+                                                            .arg(QFileInfo(path).fileName()));
+    return;
+  }
+  QApplication::setOverrideCursor(Qt::WaitCursor);
+  const bool ok = t->document()->saveFlattened(toFsPath(path));
+  QApplication::restoreOverrideCursor();
+  if (!ok) {
+    QMessageBox::warning(this, tr("Save as Flattened"), tr("Couldn't save %1.").arg(QDir::toNativeSeparators(path)));
+    return;
+  }
+  rememberDir(path);
+  statusBar()->showMessage(tr("Saved a flattened copy as %1").arg(QFileInfo(path).fileName()), 5000);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Extract and split
+
+namespace {
+// `name` (without .pdf) in `dir`, made unique with " 2", " 3"... if something is there already.
+QString freeFileName(const QString& dir, const QString& name) {
+  QString path = dir + "/" + name + ".pdf";
+  for (int i = 2; QFileInfo::exists(path); ++i) path = dir + "/" + name + QStringLiteral(" %1.pdf").arg(i);
+  return path;
+}
+}  // namespace
+
+void MainWindow::extractPages() {
+  DocumentTab* t = tab();
+  if (!t || !t->hasDocument()) return;
+  t->finishTextEditing();
+  const int count = t->document()->pageCount();
+  std::vector<int> chosen = t->thumbnails()->selectedPages();
+  if (chosen.empty()) chosen.assign(1, t->view()->currentPage());
+
+  QDialog dlg(this);
+  dlg.setWindowTitle(tr("Extract Pages"));
+  auto* lay = new QVBoxLayout(&dlg);
+  auto* form = new QFormLayout;
+  auto* range = new QLineEdit(describePages(chosen), &dlg);
+  range->setToolTip(tr("Page numbers and ranges, e.g. 1-3, 5, 8-"));
+  form->addRow(tr("Pages (of %1):").arg(count), range);
+  lay->addLayout(form);
+  auto* separate = new QCheckBox(tr("Each page as a file of its own"), &dlg);
+  auto* remove = new QCheckBox(tr("Then delete them from this document"), &dlg);
+  auto* open = new QCheckBox(tr("Open the new file"), &dlg);
+  open->setChecked(true);
+  connect(separate, &QCheckBox::toggled, open, [open](bool on) { open->setEnabled(!on); });
+  lay->addWidget(separate);
+  lay->addWidget(remove);
+  lay->addWidget(open);
+  auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+  buttons->button(QDialogButtonBox::Ok)->setText(tr("Extract…"));
+  connect(buttons, &QDialogButtonBox::accepted, &dlg, [&] {
+    if (parsePages(range->text(), count).empty()) {
+      QMessageBox::warning(&dlg, tr("Extract Pages"), tr("Type page numbers between 1 and %1, like 1-3, 5.").arg(count));
+      return;
+    }
+    dlg.accept();
+  });
+  connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+  lay->addWidget(buttons);
+  if (dlg.exec() != QDialog::Accepted) return;
+  const std::vector<int> pages = parsePages(range->text(), count);
+
+  const QString base = t->path().isEmpty() ? tr("Untitled") : QFileInfo(t->path()).completeBaseName();
+  const QString startDir = t->path().isEmpty() ? lastDir() : QFileInfo(t->path()).absolutePath();
+  QStringList written;
+  QApplication::setOverrideCursor(Qt::WaitCursor);
+  auto saveOne = [&](const std::vector<int>& which, const QString& path) {
+    auto part = t->document()->extract(which);
+    const bool ok = part && part->save(toFsPath(path));
+    if (ok) written << path;
+    return ok;
+  };
+  bool ok = true;
+  if (separate->isChecked()) {
+    QApplication::restoreOverrideCursor();
+    const QString dir = QFileDialog::getExistingDirectory(this, tr("Extract Pages To"), startDir);
+    if (dir.isEmpty()) return;
+    QApplication::setOverrideCursor(Qt::WaitCursor);
+    for (int p : pages)
+      if (!(ok = saveOne(std::vector<int>(1, p), freeFileName(dir, tr("%1 (page %2)").arg(base).arg(p + 1))))) break;
+  } else {
+    QApplication::restoreOverrideCursor();
+    const QString suggested = freeFileName(startDir, pages.size() == 1 ? tr("%1 (page %2)").arg(base).arg(pages[0] + 1)
+                                                                        : tr("%1 (pages %2)").arg(base, describePages(pages)));
+    QString path = QFileDialog::getSaveFileName(this, tr("Extract Pages"), suggested, tr(kPdfFilter));
+    if (path.isEmpty()) return;
+    if (QFileInfo(path).suffix().isEmpty()) path += ".pdf";
+    if (tabFor(QFileInfo(path).absoluteFilePath())) {
+      QMessageBox::warning(this, tr("Extract Pages"), tr("%1 is open in a tab. Close it first, or choose another name.")
+                                                          .arg(QFileInfo(path).fileName()));
+      return;
+    }
+    QApplication::setOverrideCursor(Qt::WaitCursor);
+    ok = saveOne(pages, path);
+  }
+  QApplication::restoreOverrideCursor();
+  if (!ok) {
+    QMessageBox::warning(this, tr("Extract Pages"), tr("Couldn't save the extracted pages."));
+    return;
+  }
+  if (!written.isEmpty()) rememberDir(written.front());
+  statusBar()->showMessage(written.size() == 1 ? tr("Saved %1").arg(QFileInfo(written.front()).fileName())
+                                               : tr("Saved %1 files").arg(written.size()), 5000);
+  if (remove->isChecked()) {
+    if (int(pages.size()) >= count)
+      QMessageBox::information(this, tr("Extract Pages"), tr("Every page was extracted, so none were deleted here (a PDF needs a page)."));
+    else
+      t->applyEdit(tr("Delete Pages"), pages.front(), DocumentTab::Scope::Pages,
+                   [&](pdfz::Document& d) { return d.deletePages(pages); });
+  }
+  if (open->isEnabled() && open->isChecked() && written.size() == 1) openFile(written.front());
+}
+
+void MainWindow::splitDocument() {
+  DocumentTab* t = tab();
+  if (!t || !t->hasDocument()) return;
+  t->finishTextEditing();
+  const int count = t->document()->pageCount();
+  if (count < 2) return;
+
+  QDialog dlg(this);
+  dlg.setWindowTitle(tr("Split Document"));
+  auto* lay = new QVBoxLayout(&dlg);
+  auto* form = new QFormLayout;
+  auto* per = new QSpinBox(&dlg);
+  per->setRange(1, count - 1);
+  per->setValue(std::clamp(QSettings().value("split/pages", 1).toInt(), 1, count - 1));
+  form->addRow(tr("Pages in each file:"), per);
+  auto* result = new QLabel(&dlg);
+  form->addRow(QString(), result);
+  QString dir = t->path().isEmpty() ? lastDir() : QFileInfo(t->path()).absolutePath();
+  auto* where = new QPushButton(QDir::toNativeSeparators(dir), &dlg);
+  where->setToolTip(tr("The folder the files go in"));
+  connect(where, &QPushButton::clicked, &dlg, [&] {
+    const QString d = QFileDialog::getExistingDirectory(&dlg, tr("Split Into"), dir);
+    if (d.isEmpty()) return;
+    dir = d;
+    where->setText(QDir::toNativeSeparators(d));
+  });
+  form->addRow(tr("Save in:"), where);
+  lay->addLayout(form);
+  const QString base = t->path().isEmpty() ? tr("Untitled") : QFileInfo(t->path()).completeBaseName();
+  auto update = [&] {
+    const int files = (count + per->value() - 1) / per->value();
+    result->setText((files == 1 ? tr("1 file") : tr("%1 files").arg(files)) +
+                    tr(": \"%1 (part 1).pdf\" and so on").arg(base));
+  };
+  connect(per, &QSpinBox::valueChanged, &dlg, update);
+  update();
+  auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+  buttons->button(QDialogButtonBox::Ok)->setText(tr("Split"));
+  connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+  connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+  lay->addWidget(buttons);
+  if (dlg.exec() != QDialog::Accepted) return;
+  QSettings().setValue("split/pages", per->value());
+
+  QApplication::setOverrideCursor(Qt::WaitCursor);
+  int written = 0;
+  bool ok = true;
+  for (int start = 0, part = 1; start < count && ok; start += per->value(), ++part) {
+    std::vector<int> pages;
+    for (int p = start; p < std::min(count, start + per->value()); ++p) pages.push_back(p);
+    auto doc = t->document()->extract(pages);
+    ok = doc && doc->save(toFsPath(freeFileName(dir, tr("%1 (part %2)").arg(base).arg(part))));
+    if (ok) ++written;
+  }
+  QApplication::restoreOverrideCursor();
+  if (!ok) QMessageBox::warning(this, tr("Split Document"), tr("Couldn't save every part (%1 saved).").arg(written));
+  else statusBar()->showMessage(tr("Split into %1 files in %2").arg(written).arg(QDir::toNativeSeparators(dir)), 6000);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Stamps
+
+void MainWindow::fillStampMenu(QMenu* menu) {
+  menu->clear();
+  auto addPreview = [&](const QImage& preview, const QString& tip, std::function<void()> act) {
+    auto* button = new QToolButton(menu);
+    button->setAutoRaise(true);
+    const QSize box(160, 34);
+    QImage fitted(box * 2, QImage::Format_ARGB32_Premultiplied);
+    fitted.setDevicePixelRatio(2);
+    fitted.fill(Qt::transparent);
+    {
+      QPainter p(&fitted);
+      p.setRenderHint(QPainter::SmoothPixmapTransform);
+      const QSizeF s = QSizeF(preview.size()) / preview.devicePixelRatio();
+      const double k = std::min((box.width() - 4) / s.width(), (box.height() - 4) / s.height());
+      const QSizeF d = s * k;
+      p.drawImage(QRectF(QPointF((box.width() - d.width()) / 2, (box.height() - d.height()) / 2), d), preview);
+    }
+    button->setIconSize(box);
+    button->setIcon(QIcon(QPixmap::fromImage(fitted)));
+    button->setToolTip(tip);
+    button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    auto* action = new QWidgetAction(menu);
+    action->setDefaultWidget(button);
+    connect(button, &QToolButton::clicked, this, [menu, act] {
+      menu->close();
+      act();
+    });
+    menu->addAction(action);
+  };
+  const QString author = commentAuthor();
+  for (const StampStyle& st : standardStamps()) {
+    const MadeStamp made = makeStamp(st, author);
+    addPreview(made.preview, st.title, [this, st, author] { placeStamp(makeStamp(st, author), st.title); });
+  }
+  menu->addSeparator();
+  const auto custom = CustomStamps::load();
+  for (const auto& c : custom) {
+    const MadeStamp made = makeImageStamp(c.image);
+    addPreview(made.preview, tr("Your stamp"), [this, img = c.image] { placeStamp(makeImageStamp(img), tr("Stamp")); });
+  }
+  menu->addAction(tr("Add a Stamp from a Picture…"), this, [this] {
+    const QString path = QFileDialog::getOpenFileName(this, tr("Stamp Picture"), lastDir(),
+                                                      tr("Images (*.png *.jpg *.jpeg *.bmp *.gif *.tif *.tiff)"));
+    if (path.isEmpty()) return;
+    QImageReader reader(path);
+    reader.setAutoTransform(true);
+    const QImage img = reader.read();
+    if (img.isNull()) {
+      QMessageBox::warning(this, tr("Stamp"), tr("That picture couldn't be read."));
+      return;
+    }
+    CustomStamps::add(img);
+    placeStamp(makeImageStamp(img), tr("Stamp"));
+  });
+  if (!custom.isEmpty()) {
+    QMenu* remove = menu->addMenu(tr("Remove a Stamp of Yours"));
+    for (const auto& c : custom) {
+      QAction* a = remove->addAction(QIcon(QPixmap::fromImage(c.image.scaled(64, 32, Qt::KeepAspectRatio))), tr("Stamp"), this,
+                                     [path = c.path] { CustomStamps::remove(path); });
+      a->setIconVisibleInMenu(true);
+    }
+  }
+}
+
+void MainWindow::placeStamp(const MadeStamp& stamp, const QString& subject) {
+  DocumentTab* t = tab();
+  if (!t || !t->hasDocument() || stamp.width <= 0 || stamp.height <= 0) return;
+  pdfz::Annotation a;
+  a.kind = pdfz::AnnotKind::Stamp;
+  a.subject = subject.toStdString();
+  stampAct_->setChecked(true);
+  t->view()->startPlacing(a, stamp.drawing, stamp.preview, QSizeF(stamp.width, stamp.height));
+  t->view()->setFocus();
+  statusBar()->showMessage(tr("Click where the stamp goes (Esc to cancel)"), 5000);
+  updateStyleControls();
 }

@@ -79,6 +79,38 @@ QPixmap draw(MarkupTool tool, const QColor& ink, qreal dpr) {
       p.drawLine(QPointF(20, 5), QPointF(13, 6.5));
       p.drawLine(QPointF(20, 5), QPointF(18.5, 12));
       break;
+    case MarkupTool::FillText: {  // "Ab" and a text cursor
+      QFont tiny = f;
+      tiny.setPixelSize(12);
+      p.setFont(tiny);
+      p.drawText(QRectF(1, 3, 17, 18), Qt::AlignCenter, QStringLiteral("Ab"));
+      p.setPen(QPen(ink, 1.3));
+      p.drawLine(QPointF(20, 5), QPointF(20, 19));
+      break;
+    }
+    case MarkupTool::Check:
+      p.setPen(QPen(ink, 2.4, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+      p.drawPolyline(QPolygonF({QPointF(5, 12.5), QPointF(10, 18), QPointF(19.5, 6)}));
+      break;
+    case MarkupTool::Cross:
+      p.setPen(QPen(ink, 2.4, Qt::SolidLine, Qt::RoundCap));
+      p.drawLine(QPointF(6, 6), QPointF(18, 18));
+      p.drawLine(QPointF(18, 6), QPointF(6, 18));
+      break;
+    case MarkupTool::Dot:
+      p.setPen(Qt::NoPen);
+      p.setBrush(ink);
+      p.drawEllipse(QPointF(12, 12), 4.5, 4.5);
+      break;
+    case MarkupTool::Date: {  // a calendar page
+      p.drawRoundedRect(QRectF(4, 5, 16, 15), 2, 2);
+      p.fillRect(QRectF(4, 5, 16, 4), ink);
+      QFont tiny = f;
+      tiny.setPixelSize(8);
+      p.setFont(tiny);
+      p.drawText(QRectF(4, 9, 16, 11), Qt::AlignCenter, QStringLiteral("31"));
+      break;
+    }
   }
   return pm;
 }
@@ -164,6 +196,40 @@ QIcon handToolIcon(const QPalette& palette) {
     p.setPen(QPen(ink, 1.3, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
     p.setBrush(ink.lightness() > 128 ? QColor(0x30, 0x30, 0x30) : QColor(Qt::white));
     p.drawPath(hand);
+  });
+}
+
+QIcon signIcon(const QPalette& palette) {
+  return drawnIcon(palette, 24, [](QPainter& p, const QColor& ink, bool) {
+    // A pen nib over a scribbled signature.
+    QPainterPath scribble;
+    scribble.moveTo(2, 19);
+    scribble.cubicTo(5, 12, 7, 22, 9, 17);
+    scribble.cubicTo(10.5, 13.5, 12, 20, 14, 18);
+    p.setPen(QPen(ink, 1.4, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    p.drawPath(scribble);
+    QPainterPath nib;
+    nib.moveTo(13, 14);
+    nib.lineTo(20, 3);
+    nib.lineTo(23, 5);
+    nib.lineTo(16, 16);
+    nib.lineTo(12.5, 17.5);
+    nib.closeSubpath();
+    p.setBrush(ink.lightness() > 128 ? QColor(0x30, 0x30, 0x30) : QColor(Qt::white));
+    p.drawPath(nib);
+  });
+}
+
+QIcon stampIcon(const QPalette& palette) {
+  return drawnIcon(palette, 24, [](QPainter& p, const QColor& ink, bool) {
+    // A rubber stamp: handle, neck, base, and the line it prints.
+    p.setPen(QPen(ink, 1.4, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    p.setBrush(ink.lightness() > 128 ? QColor(0x30, 0x30, 0x30) : QColor(Qt::white));
+    p.drawEllipse(QRectF(8.5, 2.5, 7, 6));
+    p.drawRect(QRectF(10.5, 8.5, 3, 5));
+    p.drawRoundedRect(QRectF(4.5, 13.5, 15, 4), 1.2, 1.2);
+    p.setPen(QPen(QColor(0xC0, 0x1C, 0x28), 2, Qt::SolidLine, Qt::RoundCap));
+    p.drawLine(QPointF(4, 21), QPointF(20, 21));
   });
 }
 

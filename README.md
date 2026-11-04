@@ -7,7 +7,7 @@ icon, nothing installed or registered.
 Built with C++20, Qt 6 Widgets and [PDFium](https://pdfium.googlesource.com/pdfium/) (the PDF
 engine in Chrome). Windows comes first, through MSYS2. It builds on Linux too.
 
-Status: **phase 1 (basic editing)** done; phase 2 next.
+Status: **phase 2 (Fill & Sign, stamps, extract and split)** done; phase 3 (export to Word and Excel) next.
 
 ## What works
 
@@ -17,12 +17,15 @@ Status: **phase 1 (basic editing)** done; phase 2 next.
 | Tabs | Each document opens in its own tab, with its own thumbnails, comments, undo and find results. Ctrl+Tab / Ctrl+Shift+Tab switch tabs and Ctrl+W closes one. Opening a file that's already open goes to its tab. While nothing is open, a welcome page lists recent files. |
 | Tools | Select tool (V): click a comment to select it (and drag to move it), drag over text to select it, or drag anywhere else to move the page. Hand tool (H): dragging always moves the page. The middle button always moves the page. Esc steps back: out of a drag, then the selection, then to the Select tool. |
 | Comments | A Comment Tools toolbar has Highlight, Underline, Strikethrough (drag over text, or select text first and use Ctrl+Shift+H/U/X), Sticky Note, Text Box, Pen, Rectangle, Ellipse, Line and Arrow. Selected comments can be moved, and rectangles, ellipses and text boxes resized by their corners. The toolbar's style controls (color, fill color or no fill, opacity, line width, and for text boxes font, size, text color and alignment) change the selected comment, or what the tool makes next; a fill can be added or taken away at any time. Arrowheads grow with the line width, as in Acrobat. Text boxes are typed in right on the page: click (or drag out a box) and type, and the box grows as the text does. Double-click one to type in it again; Esc or a click elsewhere finishes. Double-click any other comment to edit its text, press Delete to remove it, or right-click for a menu. Hovering shows a comment's text. Every change can be undone. |
+| Stamps | The Stamp button on the Comment Tools toolbar has Acrobat's stamps (Approved, Reviewed, Received and Revised say who stamped and when; Draft, Final, Confidential, Void and the rest), and pictures of your own saved as stamps. Click to place one; it can be moved and resized (keeping its shape) like any comment. |
+| Form fields | Fillable PDF forms: fields are tinted (Fill & Sign > Highlight Form Fields). With the Select tool, click a text field to type in it on the page, click check boxes and radio buttons to set them, and pick from drop-down and list boxes. Tab and Shift+Tab go from field to field (Space sets a check box or opens a list). Each change is one undo step, read-only fields stay as they are, and other readers show the values as filled in. |
+| Fill & Sign | A Fill & Sign toolbar for forms without fields: Add Text (type on the form, no box), Checkmark, Cross, Dot and today's Date, placed with a click. Sign places your signature or initials: draw one with the mouse or a pen, type it in a handwriting font, or use a photo or scan (its paper is made clear). Saved signatures are kept for next time (the Sign button's arrow lists them, and removes them). Clicking a signature field signs there. Signatures can be moved and resized. File > Save as Flattened saves a copy in which comments, signatures and form fields are part of the page and can't be changed. These are visible signatures, like ink on paper, not certificate-based digital signatures. |
 | Comments panel | F6 lists every comment by page, with author, date and text. Click one to go to it, double-click to edit it, Delete to remove it. The author name is your login name unless set in Comment > Comment Author Name. |
 | Text | Select by dragging, including across pages (the view scrolls when you drag past an edge). Double-click selects a word and triple-click a line; Shift+click extends the selection. Ctrl+A selects all, Ctrl+C copies, Esc clears. |
 | Find | Ctrl+F opens a find bar that searches as you type, on a thread of its own, so the window stays responsive on documents of thousands of pages. Every match is highlighted. Enter/F3 goes to the next match and Shift+Enter/Shift+F3 to the previous one. Match case and Whole words options. A phrase is found even where it wraps to the next line. |
 | Navigation | Page thumbnails (F4), page number box, Home/End, Left/Right, Space/Shift+Space |
 | Files | Open (and drag and drop), password-protected files, Open Recent, Save, Save As. Saves go to a temporary file first, then replace the original. |
-| Pages | Drag thumbnails to reorder (several at once with Ctrl/Shift-click). Insert a blank page, insert the pages of another PDF, rotate, delete (Delete key in the thumbnails). |
+| Pages | Drag thumbnails to reorder (several at once with Ctrl/Shift-click). Insert a blank page, insert the pages of another PDF, rotate, delete (Delete key in the thumbnails). Extract Pages saves pages (like "1-3, 5, 8-") as a new PDF, or each as a file of its own, and can delete them here afterwards. Split Document saves the document as several PDFs of so many pages each. Extracted pages keep their form fields. |
 | Undo | Ctrl+Z / Ctrl+Y for every page edit. The title bar's modified marker follows undo and redo back to the saved state. |
 | Printing | System print dialog, with page ranges and the current page. Shrinks to fit and auto-rotates landscape pages. Rendered at the printer's resolution. |
 
@@ -91,14 +94,16 @@ pdfz-info file.pdf --password secret
 src/core          pdfz: PDFium behind a small thread-safe C++ API, with no Qt
                   (Engine; Document: open, render, page edits, save; EditHistory: undo
                   snapshots; PageText: characters and their boxes, hit-testing, selection;
-                  annotations: comments and markups; geometry: the page frames)
+                  annotations: comments, markups and stamps; forms: form fields;
+                  geometry: the page frames)
 src/app           the Qt 6 app: MainWindow (menus, toolbars, tabs), DocumentTab (one open
                   document), DocumentView (tiled continuous view, selection, the markup
                   tools), PageRenderer (worker thread + image caches), ThumbnailPanel (drag
                   to reorder), CommentsPanel, CommentDialog, Markup (annotation cache,
                   hit-testing, tool styles, text box appearances), InlineTextEdit (typing
-                  in a text box on the page), ToolIcons, TextSearch (search thread) +
-                  FindBar, Printing
+                  in a text box or form field on the page), Forms (field cache), Signatures
+                  + SignatureDialog (draw, type or picture; saved ones), Stamps, ToolIcons,
+                  TextSearch (search thread) + FindBar, Printing
 src/tools         pdfz-info
 tests             doctest unit tests for src/core
 cmake             PDFium download/import, Windows deploy script
@@ -120,6 +125,18 @@ with "Line" or "Arrow" as their subject. While a text box is typed in, it's hidd
 document (the editor shows its text), and the change is one undo step when the typing ends. As in Acrobat, a highlight's comment text starts out as
 the text it marks.
 
+Form fields are filled through PDFium's form layer (as if typed or clicked), so each field
+keeps its own formatting and appearance. That layer draws fields over everything else, so
+where a comment or signature overlaps a field, the page is drawn a second time without
+comments and the two are combined, keeping the comment on top as it is in the file. There is
+no JavaScript: forms that calculate totals by script don't calculate.
+
+Signatures, initials, check marks and stamps are Stamp annotations whose appearance pdfz builds
+from filled outlines (pen strokes given their width, typed names as glyph outlines) or a
+picture with transparency, so they scale cleanly when resized and look the same everywhere.
+Saved signatures are kept in `signatures.json` in the app's data folder
+(`%APPDATA%\PDFEditZD\PDFEditZD` on Windows), and picture stamps in `stamps` beside it.
+
 Undo keeps whole-document snapshots (the bytes of a PDF) rather than inverse operations.
 PDFium can't put a deleted page back, only import a copy of it, and bookmarks, links and form
 fields pointing at the original page would quietly break. While a document is unedited, its
@@ -130,8 +147,8 @@ oldest first.
 
 1. ~~**Phase 1, basic editing:** undo/redo for page edits, drag to reorder thumbnails, text
    selection, copy and search, markups and comments with a comments panel, tabs.~~ Done.
-2. **Phase 2:** Fill & Sign (AcroForm filling, plus a visual signature from a drawn or typed
-   image). Stamps. Extract and split pages.
+2. ~~**Phase 2:** Fill & Sign (form filling, and visible signatures drawn, typed or from a
+   picture), stamps, extract and split pages.~~ Done.
 3. **Phase 3:** export to Word and Excel. This is a layout-analysis problem: rebuilding
    paragraphs and tables from positioned text. It will be a separate module, and good results
    are expected on simple documents.

@@ -4,6 +4,8 @@
 
 #include "DocumentView.hpp"
 #include "Markup.hpp"
+#include "Signatures.hpp"
+#include "Stamps.hpp"
 
 #include <QMainWindow>
 
@@ -73,6 +75,8 @@ private:
   void insertBlankPage();
   void insertPagesFromFile();
   void rotatePages(int degrees);
+  void extractPages();
+  void splitDocument();
 
   void onCurrentPageChanged(int page);
   void onZoomChanged(double zoom, DocumentView::FitMode mode);
@@ -97,6 +101,17 @@ private:
   void showViewMenu(DocumentTab* t, const QPoint& globalPos, int page, int annotIndex);
   void markupSelection(MarkupTool tool);
   void setAuthor();
+
+  // Fill & Sign
+  void fillSignMenu(QMenu* menu);  // fills the Sign menu: saved signatures, add, remove
+  // Places `sig` with the next click; asks for a new one if `sig` is empty.
+  void sign(std::optional<Signature> sig, bool initials);
+  // A signature field was clicked: the newest saved signature, fitted into it.
+  void signField(DocumentTab* t, int page, const pdfz::RectF& rect);
+  std::optional<Signature> newSignature(bool initials);  // the dialog; saved if asked
+  void saveFlattened();
+  void fillStampMenu(QMenu* menu);
+  void placeStamp(const MadeStamp& stamp, const QString& subject);
 
   QStackedWidget* central_;
   QWidget* welcome_;
@@ -124,6 +139,8 @@ private:
   QAction* authorAct_;
   QAction* deletePagesAct_;
   QAction* insertBlankAct_;
+  QAction* extractAct_;
+  QAction* splitAct_;
   QAction* insertFileAct_;
   QAction* rotateCwAct_;
   QAction* rotateCcwAct_;
@@ -137,6 +154,12 @@ private:
   QAction* nextTabAct_;
   QAction* prevTabAct_;
   QAction* aboutAct_;
+  QAction* saveFlatAct_;
+  QAction* signAct_;
+  QAction* stampAct_;
+  QAction* highlightFieldsAct_;
+  QToolBar* fillBar_;
+  QMenu* signMenu_;
   QAction* selectToolAct_;
   QAction* handToolAct_;
   std::array<QAction*, kMarkupToolCount> markupActs_{};
