@@ -47,13 +47,21 @@ public:
   const std::shared_ptr<pdfz::Document>& document() const { return doc_; }
   // The pages changed (deleted, moved, rotated...): forget everything rendered so far.
   void invalidate();
+  // One page's content changed (a comment added, say): what was rendered of it is out of date.
+  // It stays cached, and keeps being shown, until the new rendering replaces it, so the page
+  // never goes blank in between.
+  void invalidatePage(int page);
 
   // Rounds a scale to one tiles are made at, so nearby zooms share them.
   static int scaleKeyFor(double devicePixelsPerPoint);
 
-  // Cached images, or null ones.
-  QImage tile(const TileKey& key) const;
-  QImage preview(int page) const;
+  // Cached images, or null ones. `fresh` says whether it shows the page as it is now (false
+  // after invalidatePage(), until it's rendered again).
+  QImage tile(const TileKey& key, bool* fresh = nullptr) const;
+  QImage preview(int page, bool* fresh = nullptr) const;
+  // The tiles of a page cached at other zooms than `scaleKey`: drawn, scaled, while the ones at
+  // the new zoom are on their way.
+  std::vector<std::pair<TileKey, QImage>> otherTiles(int page, int scaleKey) const;
 
   // What the view needs now, most important first. Replaces what the view asked for before,
   // so work for places scrolled past is dropped.
@@ -70,18 +78,25 @@ private:
     bool isTile = false;
     int page = 0;
     TileKey key;
+    quint64 epoch = 0;  // the page's epoch when asked for; results from older ones are dropped
     friend bool operator==(const Job&, const Job&) = default;
   };
 
   void run();
-  void deliver(quint64 serial, bool isTile, int page, TileKey key, QImage image);
+  void deliver(quint64 serial, const Job& job, QImage image);
+  quint64 epochOf(int page) const { return pageEpochs_.value(page, 0); }
   void clearQueues();  // caller holds mutex_
 
   std::shared_ptr<pdfz::Document> doc_;
   quint64 serial_ = 0;  // bumped on every setDocument()/invalidate(); stale results are dropped
 
-  QCache<TileKey, QImage> tiles_;
-  QCache<int, QImage> previews_;
+  struct Cached {
+    QImage image;
+    quint64 epoch = 0;  // the page's epoch it was rendered at
+  };
+  QCache<TileKey, Cached> tiles_;
+  QCache<int, Cached> previews_;
+  QHash<int, quint64> pageEpochs_;  // bumped by invalidatePage(); UI thread only
 
   // Shared with the worker thread, under mutex_.
   std::mutex mutex_;

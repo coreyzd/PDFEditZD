@@ -1,0 +1,246 @@
+// SPDX-License-Identifier: GPL-3.0-only
+#include "ToolIcons.hpp"
+
+#include <QPainter>
+#include <QPainterPath>
+#include <QPalette>
+#include <QPixmap>
+
+#include <cmath>
+#include <utility>
+
+namespace {
+
+QPixmap draw(MarkupTool tool, const QColor& ink, qreal dpr) {
+  const int size = 24;
+  QPixmap pm(int(size * dpr), int(size * dpr));
+  pm.setDevicePixelRatio(dpr);
+  pm.fill(Qt::transparent);
+  QPainter p(&pm);
+  p.setRenderHint(QPainter::Antialiasing);
+  QPen pen(ink, 1.6, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
+  p.setPen(pen);
+  p.setBrush(Qt::NoBrush);
+  QFont f = p.font();
+  f.setPixelSize(13);
+  f.setBold(true);
+  p.setFont(f);
+  const QColor yellow(0xFF, 0xD8, 0x2A), green(0x1E, 0xA0, 0x4A), red(0xE0, 0x30, 0x30);
+  switch (tool) {
+    case MarkupTool::Highlight:
+      p.fillRect(QRectF(3, 6, 18, 12), yellow);
+      p.drawText(QRectF(3, 4, 18, 16), Qt::AlignCenter, QStringLiteral("T"));
+      break;
+    case MarkupTool::Underline:
+      p.drawText(QRectF(3, 1, 18, 16), Qt::AlignCenter, QStringLiteral("U"));
+      p.setPen(QPen(green, 2.2, Qt::SolidLine, Qt::RoundCap));
+      p.drawLine(QPointF(5, 20), QPointF(19, 20));
+      break;
+    case MarkupTool::StrikeOut:
+      p.drawText(QRectF(3, 3, 18, 16), Qt::AlignCenter, QStringLiteral("S"));
+      p.setPen(QPen(red, 2.2, Qt::SolidLine, Qt::RoundCap));
+      p.drawLine(QPointF(4, 12), QPointF(20, 12));
+      break;
+    case MarkupTool::Note: {
+      QPainterPath path;
+      path.moveTo(4, 4);
+      path.lineTo(20, 4);
+      path.lineTo(20, 15);
+      path.lineTo(15, 20);
+      path.lineTo(4, 20);
+      path.closeSubpath();
+      p.setBrush(yellow);
+      p.drawPath(path);
+      p.setBrush(Qt::NoBrush);
+      p.drawLine(QPointF(7.5, 9), QPointF(16.5, 9));
+      p.drawLine(QPointF(7.5, 13), QPointF(13.5, 13));
+      break;
+    }
+    case MarkupTool::TextBox:
+      p.setPen(QPen(ink, 1.2, Qt::DashLine));
+      p.drawRect(QRectF(3, 4, 18, 16));
+      p.setPen(pen);
+      p.drawText(QRectF(3, 4, 18, 16), Qt::AlignCenter, QStringLiteral("T"));
+      break;
+    case MarkupTool::Pen: {
+      QPainterPath s;
+      s.moveTo(3, 17);
+      s.cubicTo(7, 6, 10, 22, 14, 12);
+      s.cubicTo(16, 7, 19, 9, 21, 6);
+      p.setPen(QPen(ink, 2, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+      p.drawPath(s);
+      break;
+    }
+    case MarkupTool::Rectangle: p.drawRect(QRectF(4, 6, 16, 12)); break;
+    case MarkupTool::Ellipse: p.drawEllipse(QRectF(3, 6, 18, 12)); break;
+    case MarkupTool::Line: p.drawLine(QPointF(4, 19), QPointF(20, 5)); break;
+    case MarkupTool::Arrow:
+      p.drawLine(QPointF(4, 19), QPointF(20, 5));
+      p.drawLine(QPointF(20, 5), QPointF(13, 6.5));
+      p.drawLine(QPointF(20, 5), QPointF(18.5, 12));
+      break;
+  }
+  return pm;
+}
+
+}  // namespace
+
+QIcon toolIcon(MarkupTool tool, const QPalette& palette) {
+  QIcon icon;
+  for (qreal dpr : {1.0, 2.0}) {
+    icon.addPixmap(draw(tool, palette.color(QPalette::Active, QPalette::ButtonText), dpr), QIcon::Normal);
+    icon.addPixmap(draw(tool, palette.color(QPalette::Disabled, QPalette::ButtonText), dpr), QIcon::Disabled);
+  }
+  return icon;
+}
+
+namespace {
+
+// Draws an icon at 1x and 2x, normal and disabled.
+template <typename Fn>
+QIcon drawnIcon(const QPalette& palette, int size, Fn&& paint) {
+  QIcon icon;
+  for (qreal dpr : {1.0, 2.0})
+    for (auto [mode, group] : {std::pair{QIcon::Normal, QPalette::Active}, std::pair{QIcon::Disabled, QPalette::Disabled}}) {
+      QPixmap pm(int(size * dpr), int(size * dpr));
+      pm.setDevicePixelRatio(dpr);
+      pm.fill(Qt::transparent);
+      QPainter p(&pm);
+      p.setRenderHint(QPainter::Antialiasing);
+      paint(p, palette.color(group, QPalette::ButtonText), mode == QIcon::Disabled);
+      p.end();
+      icon.addPixmap(pm, mode);
+    }
+  return icon;
+}
+
+void drawNoColor(QPainter& p, const QRectF& r) {
+  p.setPen(QPen(QColor(0, 0, 0, 110), 1));
+  p.setBrush(Qt::white);
+  p.drawRoundedRect(r, 3, 3);
+  p.setPen(QPen(QColor(0xE0, 0x1B, 0x24), 1.6));
+  p.drawLine(r.bottomLeft() + QPointF(2, -2), r.topRight() + QPointF(-2, 2));
+}
+
+}  // namespace
+
+QIcon selectToolIcon(const QPalette& palette) {
+  return drawnIcon(palette, 24, [](QPainter& p, const QColor& ink, bool) {
+    QPainterPath arrow;  // the usual pointer, tip at the top left
+    arrow.moveTo(7, 3);
+    arrow.lineTo(7, 19);
+    arrow.lineTo(10.8, 15.4);
+    arrow.lineTo(13.6, 21.2);
+    arrow.lineTo(16.2, 20);
+    arrow.lineTo(13.4, 14.4);
+    arrow.lineTo(18.6, 14.2);
+    arrow.closeSubpath();
+    const bool dark = ink.lightness() > 128;  // a dark theme: a light pointer
+    p.setPen(QPen(dark ? QColor(0x20, 0x20, 0x20) : ink, 1.3, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    p.setBrush(dark ? ink : QColor(Qt::white));
+    p.drawPath(arrow);
+  });
+}
+
+QIcon handToolIcon(const QPalette& palette) {
+  return drawnIcon(palette, 24, [](QPainter& p, const QColor& ink, bool) {
+    // An open hand: four fingers, a thumb and the palm, drawn as one outline.
+    QPainterPath hand;
+    hand.setFillRule(Qt::WindingFill);
+    const double fingers[4][3] = {{6.6, 6.5, 2.6}, {9.6, 3.6, 2.6}, {12.6, 3.2, 2.6}, {15.6, 5.2, 2.6}};
+    for (const auto& f : fingers) hand.addRoundedRect(QRectF(f[0], f[1], f[2], 11), 1.3, 1.3);
+    QPainterPath palm;
+    palm.moveTo(6.6, 11);
+    palm.lineTo(18.2, 11);
+    palm.lineTo(18.2, 15);
+    palm.cubicTo(18.2, 19, 16, 21.4, 12.6, 21.4);
+    palm.lineTo(11.4, 21.4);
+    palm.cubicTo(9.4, 21.4, 8.4, 20.6, 7.2, 19);
+    palm.lineTo(3.6, 14);
+    palm.cubicTo(2.8, 12.8, 4.4, 11.4, 5.6, 12.6);
+    palm.lineTo(6.6, 13.6);
+    palm.closeSubpath();
+    hand = hand.united(palm).simplified();
+    p.setPen(QPen(ink, 1.3, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    p.setBrush(ink.lightness() > 128 ? QColor(0x30, 0x30, 0x30) : QColor(Qt::white));
+    p.drawPath(hand);
+  });
+}
+
+QIcon strokeColorIcon(const QColor& color, const QPalette& palette) {
+  return drawnIcon(palette, 20, [&](QPainter& p, const QColor& ink, bool disabled) {
+    const QColor c = color.isValid() && !disabled ? color : QColor(ink.red(), ink.green(), ink.blue(), 90);
+    p.setPen(QPen(QColor(0, 0, 0, 110), 1));
+    p.setBrush(Qt::NoBrush);
+    p.drawRoundedRect(QRectF(2.5, 2.5, 15, 15), 3, 3);
+    p.drawRoundedRect(QRectF(7.5, 7.5, 5, 5), 1, 1);
+    p.setPen(QPen(c, 4));
+    p.drawRect(QRectF(5, 5, 10, 10));
+  });
+}
+
+QIcon fillColorIcon(const QColor& color, const QPalette& palette) {
+  return drawnIcon(palette, 20, [&](QPainter& p, const QColor& ink, bool disabled) {
+    if (!color.isValid() && !disabled) {
+      drawNoColor(p, QRectF(2.5, 2.5, 15, 15));
+      return;
+    }
+    p.setPen(QPen(QColor(0, 0, 0, 110), 1));
+    p.setBrush(disabled ? QColor(ink.red(), ink.green(), ink.blue(), 70) : color);
+    p.drawRoundedRect(QRectF(2.5, 2.5, 15, 15), 3, 3);
+  });
+}
+
+QIcon textColorIcon(const QColor& color, const QPalette& palette) {
+  return drawnIcon(palette, 20, [&](QPainter& p, const QColor& ink, bool disabled) {
+    QFont f = p.font();
+    f.setPixelSize(13);
+    f.setBold(true);
+    p.setFont(f);
+    p.setPen(ink);
+    p.drawText(QRectF(0, 0, 20, 15), Qt::AlignCenter, QStringLiteral("A"));
+    p.fillRect(QRectF(3, 15, 14, 3.5), color.isValid() && !disabled ? color : QColor(ink.red(), ink.green(), ink.blue(), 90));
+  });
+}
+
+QIcon alignIcon(int align, const QPalette& palette) {
+  return drawnIcon(palette, 20, [&](QPainter& p, const QColor& ink, bool) {
+    p.setPen(QPen(ink, 1.6, Qt::SolidLine, Qt::RoundCap));
+    const double widths[] = {14, 9, 14, 7};
+    for (int i = 0; i < 4; ++i) {
+      const double w = widths[i], y = 4.5 + i * 3.7;
+      const double x = align == 0 ? 3 : align == 1 ? 10 - w / 2 : 17 - w;
+      p.drawLine(QPointF(x, y), QPointF(x + w, y));
+    }
+  });
+}
+
+QIcon colorIcon(const QColor& color) {
+  if (!color.isValid()) {
+    QIcon icon;
+    for (qreal dpr : {1.0, 2.0}) {
+      QPixmap pm(int(20 * dpr), int(20 * dpr));
+      pm.setDevicePixelRatio(dpr);
+      pm.fill(Qt::transparent);
+      QPainter p(&pm);
+      p.setRenderHint(QPainter::Antialiasing);
+      drawNoColor(p, QRectF(2.5, 2.5, 15, 15));
+      p.end();
+      icon.addPixmap(pm);
+    }
+    return icon;
+  }
+  QIcon icon;
+  for (qreal dpr : {1.0, 2.0}) {
+    QPixmap pm(int(20 * dpr), int(20 * dpr));
+    pm.setDevicePixelRatio(dpr);
+    pm.fill(Qt::transparent);
+    QPainter p(&pm);
+    p.setRenderHint(QPainter::Antialiasing);
+    p.setPen(QPen(QColor(0, 0, 0, 110), 1));
+    p.setBrush(color);
+    p.drawRoundedRect(QRectF(2.5, 2.5, 15, 15), 3, 3);
+    icon.addPixmap(pm);
+  }
+  return icon;
+}

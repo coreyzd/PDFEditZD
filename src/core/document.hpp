@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <set>
 #include <shared_mutex>
 #include <string>
 #include <vector>
@@ -63,6 +64,13 @@ enum class OpenError {
 const char* describe(OpenError e);
 
 class Document;
+struct PageText;
+struct PageFrame;
+struct Annotation;
+
+// The complete bytes of a PDF file, shared without copying (an open document keeps its file's
+// bytes; undo snapshots are these too).
+using Bytes = std::shared_ptr<const std::vector<std::uint8_t>>;
 
 struct OpenResult {
   std::unique_ptr<Document> document;
@@ -75,6 +83,7 @@ public:
   // open (on Windows an open file can't be replaced, and "Save" writes over the original).
   static OpenResult open(const std::filesystem::path& path, const std::string& password = {});
   static OpenResult openMemory(std::vector<std::uint8_t> bytes, const std::string& password = {});
+  static OpenResult openBytes(Bytes bytes, const std::string& password = {});
   // A new document with no pages.
   static std::unique_ptr<Document> create();
 
@@ -99,6 +108,33 @@ public:
   // The whole page, scaled to fit inside maxWidth x maxHeight pixels.
   Bitmap renderFit(int index, int maxWidth, int maxHeight, unsigned flags = RenderAnnotations) const;
 
+  // The text of a page with where each character is (see text.hpp). Empty for a page with no
+  // text, or a scanned page without a text layer.
+  PageText extractText(int index) const;
+
+  // How the page's PDF coordinates map to the display frame.
+  PageFrame pageFrame(int index) const;
+
+  // Comments and markups (annotations.hpp). annotations() lists everything on the page except
+  // links, form fields and the pop-ups that belong to notes.
+  std::vector<Annotation> annotations(int page) const;
+  // Adds `a` to the page and returns its index, or -1. The author, contents and dates are
+  // written as given (modified and name are filled in when empty).
+  int addAnnotation(int page, const Annotation& a);
+  // Rewrites annotation `index` from `a`: geometry, colors, opacity, border, strings,
+  // appearance. Returns its index afterwards (or -1): the same one, unless taking away a fill
+  // meant making the annotation anew (PDFium can't remove a color entry), which puts it last.
+  int updateAnnotation(int page, int index, const Annotation& a);
+  // Moves an annotation by (dx, dy) display points, keeping its appearance.
+  bool moveAnnotation(int page, int index, double dx, double dy);
+  // Changes only the comment text, keeping the appearance (any kind, even ones pdfz didn't make).
+  bool setAnnotationContents(int page, int index, const std::string& contents);
+  // Removes an annotation, and its pop-up if it has one.
+  bool removeAnnotation(int page, int index);
+  // Hides or shows an annotation (its Hidden flag), e.g. while it's being edited in place.
+  // Not an edit: snapshot() ignores it while the document is otherwise unedited.
+  bool setAnnotationHidden(int page, int index, bool hidden);
+
   // Page editing. Indices are 0-based; each returns false (and changes nothing) on bad input.
   bool deletePage(int index);
   // A blank page that becomes page `index` (index == pageCount() appends).
@@ -117,6 +153,11 @@ public:
   // then replaces `path`, so a failed save never leaves a half-written file behind.
   bool save(const std::filesystem::path& path) const;
   std::vector<std::uint8_t> saveToMemory() const;
+  // The document as it is now, as the bytes of a PDF: the bytes it was opened from while it is
+  // unedited (no copy), otherwise a fresh save. Empty if saving fails.
+  Bytes snapshot() const;
+  // The password the document was opened with (needed to open its snapshots again).
+  const std::string& password() const { return password_; }
 
   // True after any page edit, until the next successful save().
   bool modified() const { return modified_; }
@@ -130,8 +171,22 @@ private:
   void refreshPageSizes();  // caller holds the engine lock
   bool writeTo(std::vector<std::uint8_t>& out) const;  // caller holds the engine lock
 
+  void markEdited() { modified_ = true; edited_ = true; }
+  // The caller holds the engine lock for all of these.
+  // A parsed page, from a small cache: parsing a page's content is the slow part of anything
+  // done with it (a detailed drawing can take a tenth of a second), so the pages in use stay
+  // parsed. Owned by the cache; valid until the next call that changes the page list.
+  void* cachedPage(int index) const;
+  void dropCachedPages() const;
+  // Has PDFium store appearances for the annotations changed since the last save.
+  void flushAppearances() const;
+
   void* doc_ = nullptr;  // FPDF_DOCUMENT
-  std::vector<std::uint8_t> bytes_;  // must outlive doc_: PDFium reads from it lazily
+  Bytes bytes_;  // must outlive doc_: PDFium reads from it lazily
+  std::string password_;
+  bool edited_ = false;  // changed since it was opened (unlike modified_, saving doesn't reset it)
+  mutable std::vector<std::pair<int, void*>> pages_;  // page index, FPDF_PAGE; most recent first
+  mutable std::set<int> needsAppearances_;            // pages with changed annotations
   // Page sizes, read without the engine lock (the UI lays pages out while a worker renders).
   mutable std::shared_mutex sizesMutex_;
   std::vector<SizeF> sizes_;

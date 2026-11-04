@@ -51,20 +51,38 @@ void PageRenderer::invalidate() {
   ++serial_;
   tiles_.clear();
   previews_.clear();
+  pageEpochs_.clear();
   std::lock_guard lock(mutex_);
   clearQueues();
   jobDoc_ = doc_;
   jobSerial_ = serial_;
 }
 
-QImage PageRenderer::tile(const TileKey& key) const {
-  const QImage* img = tiles_.object(key);
-  return img ? *img : QImage();
+void PageRenderer::invalidatePage(int page) {
+  ++pageEpochs_[page];
+  std::lock_guard lock(mutex_);
+  for (auto* q : {&viewJobs_, &lowJobs_})
+    q->erase(std::remove_if(q->begin(), q->end(), [&](const Job& j) { return j.page == page; }), q->end());
 }
 
-QImage PageRenderer::preview(int page) const {
-  const QImage* img = previews_.object(page);
-  return img ? *img : QImage();
+QImage PageRenderer::tile(const TileKey& key, bool* fresh) const {
+  const Cached* c = tiles_.object(key);
+  if (fresh) *fresh = c && c->epoch == epochOf(key.page);
+  return c ? c->image : QImage();
+}
+
+QImage PageRenderer::preview(int page, bool* fresh) const {
+  const Cached* c = previews_.object(page);
+  if (fresh) *fresh = c && c->epoch == epochOf(page);
+  return c ? c->image : QImage();
+}
+
+std::vector<std::pair<TileKey, QImage>> PageRenderer::otherTiles(int page, int scaleKey) const {
+  std::vector<std::pair<TileKey, QImage>> out;
+  for (const TileKey& k : tiles_.keys())
+    if (k.page == page && k.scaleKey != scaleKey)
+      if (const Cached* c = tiles_.object(k)) out.emplace_back(k, c->image);
+  return out;
 }
 
 void PageRenderer::requestView(const std::vector<int>& previews, const std::vector<TileKey>& tiles) {
@@ -74,17 +92,18 @@ void PageRenderer::requestView(const std::vector<int>& previews, const std::vect
     auto add = [&](const Job& j) {
       if (current_ != j) viewJobs_.push_back(j);  // the one being drawn right now is coming anyway
     };
-    for (int p : previews) add({false, p, {}});
-    for (const TileKey& k : tiles) add({true, k.page, k});
+    for (int p : previews) add({false, p, {}, epochOf(p)});
+    for (const TileKey& k : tiles) add({true, k.page, k, epochOf(k.page)});
   }
   wake_.notify_one();
 }
 
 void PageRenderer::requestPreview(int page) {
-  if (previews_.contains(page)) return;
+  bool fresh = false;
+  if (!preview(page, &fresh).isNull() && fresh) return;
   {
     std::lock_guard lock(mutex_);
-    const Job j{false, page, {}};
+    const Job j{false, page, {}, epochOf(page)};
     if (current_ == j) return;
     auto it = std::find(lowJobs_.begin(), lowJobs_.end(), j);
     if (it != lowJobs_.end()) lowJobs_.erase(it);
@@ -133,19 +152,20 @@ void PageRenderer::run() {
     }
     if (!image.isNull()) {
       QMetaObject::invokeMethod(
-          this, [this, serial, job, image] { deliver(serial, job.isTile, job.page, job.key, image); },
+          this, [this, serial, job, image] { deliver(serial, job, image); },
           Qt::QueuedConnection);
     }
   }
 }
 
-void PageRenderer::deliver(quint64 serial, bool isTile, int page, TileKey key, QImage image) {
+void PageRenderer::deliver(quint64 serial, const Job& job, QImage image) {
   if (serial != serial_) return;  // rendered for a document (or page order) that's gone
-  if (isTile) {
-    tiles_.insert(key, new QImage(image), costKiB(image));
-    emit tileReady(key);
+  if (job.epoch != epochOf(job.page)) return;  // the page has changed since
+  if (job.isTile) {
+    tiles_.insert(job.key, new Cached{image, job.epoch}, costKiB(image));
+    emit tileReady(job.key);
   } else {
-    previews_.insert(page, new QImage(image), costKiB(image));
-    emit previewReady(page);
+    previews_.insert(job.page, new Cached{image, job.epoch}, costKiB(image));
+    emit previewReady(job.page);
   }
 }

@@ -9,6 +9,14 @@ add_executable(pdfeditzd
   PageRenderer.cpp
   ThumbnailPanel.cpp
   Printing.cpp
+  TextSearch.cpp
+  FindBar.cpp
+  DocumentTab.cpp
+  InlineTextEdit.cpp
+  Markup.cpp
+  CommentDialog.cpp
+  CommentsPanel.cpp
+  ToolIcons.cpp
 )
 target_compile_definitions(pdfeditzd PRIVATE PDFZ_VERSION="${PROJECT_VERSION}")
 if(WIN32)

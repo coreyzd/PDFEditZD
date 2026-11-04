@@ -11,7 +11,7 @@ class QWidget;
 class QPrinter;
 namespace pdfz { class Document; }
 
-// Shows the print dialog and prints. Returns false if the user cancelled or printing failed.
+// Shows the print dialog and prints. Returns false if the user canceled or printing failed.
 bool printDocument(QWidget* parent, const pdfz::Document& doc, const QString& title, int currentPage);
 
 // Prints pages [from, to] (0-based, inclusive) on an already set-up printer, with no dialog.

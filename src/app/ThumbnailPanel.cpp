@@ -5,10 +5,19 @@
 
 #include <QApplication>
 #include <QContextMenuEvent>
+#include <QDataStream>
+#include <QMimeData>
 #include <QPainter>
 #include <QScrollBar>
+#include <QTimer>
 
 #include <algorithm>
+
+namespace {
+// Pages being dragged: the model that started the drag (so pages can't be dropped into another
+// window's document by mistake) and the page numbers.
+const QString kPagesMime = QStringLiteral("application/x-pdfeditzd-pages");
+}  // namespace
 
 ThumbnailModel::ThumbnailModel(PageRenderer* renderer, QObject* parent)
     : QAbstractListModel(parent), renderer_(renderer) {
@@ -24,6 +33,10 @@ void ThumbnailModel::reset() {
   endResetModel();
 }
 
+void ThumbnailModel::pageChanged(int page) {
+  if (page >= 0 && page < rows_) emit dataChanged(index(page), index(page), {Qt::DecorationRole});
+}
+
 int ThumbnailModel::rowCount(const QModelIndex& parent) const { return parent.isValid() ? 0 : rows_; }
 
 QVariant ThumbnailModel::data(const QModelIndex& index, int role) const {
@@ -32,8 +45,9 @@ QVariant ThumbnailModel::data(const QModelIndex& index, int role) const {
   switch (role) {
     case Qt::DisplayRole: return QString::number(page + 1);
     case Qt::DecorationRole: {
-      QImage img = renderer_->preview(page);
-      if (img.isNull()) renderer_->requestPreview(page);  // data() is only asked for rows on screen
+      bool fresh = false;
+      QImage img = renderer_->preview(page, &fresh);
+      if (!fresh) renderer_->requestPreview(page);  // data() is only asked for rows on screen
       return img;
     }
     case PageSizeRole: {
@@ -53,6 +67,63 @@ QVariant ThumbnailModel::data(const QModelIndex& index, int role) const {
   }
 }
 
+Qt::ItemFlags ThumbnailModel::flags(const QModelIndex& index) const {
+  // Drops land between rows (the list itself accepts them), never onto a page.
+  if (!index.isValid()) return Qt::ItemIsDropEnabled;
+  return QAbstractListModel::flags(index) | Qt::ItemIsDragEnabled;
+}
+
+QStringList ThumbnailModel::mimeTypes() const { return {kPagesMime}; }
+
+QMimeData* ThumbnailModel::mimeData(const QModelIndexList& indexes) const {
+  std::vector<int> rows;
+  for (const QModelIndex& i : indexes)
+    if (i.isValid()) rows.push_back(i.row());
+  std::sort(rows.begin(), rows.end());
+  rows.erase(std::unique(rows.begin(), rows.end()), rows.end());
+  QByteArray bytes;
+  QDataStream out(&bytes, QIODevice::WriteOnly);
+  out << quint64(reinterpret_cast<quintptr>(this)) << qint32(rows.size());
+  for (int r : rows) out << qint32(r);
+  auto* data = new QMimeData;
+  data->setData(kPagesMime, bytes);
+  return data;
+}
+
+namespace {
+bool decodePages(const QMimeData* data, const void* model, std::vector<int>& pages) {
+  if (!data || !data->hasFormat(kPagesMime)) return false;
+  QDataStream in(data->data(kPagesMime));
+  quint64 source = 0;
+  qint32 n = 0;
+  in >> source >> n;
+  if (source != quint64(reinterpret_cast<quintptr>(model)) || n <= 0) return false;
+  pages.resize(std::size_t(n));
+  for (int& p : pages) {
+    qint32 v = 0;
+    in >> v;
+    p = v;
+  }
+  return in.status() == QDataStream::Ok;
+}
+}  // namespace
+
+bool ThumbnailModel::canDropMimeData(const QMimeData* data, Qt::DropAction, int, int, const QModelIndex&) const {
+  std::vector<int> pages;
+  return decodePages(data, this, pages);
+}
+
+bool ThumbnailModel::dropMimeData(const QMimeData* data, Qt::DropAction, int row, int, const QModelIndex& parent) {
+  std::vector<int> pages;
+  if (!decodePages(data, this, pages)) return false;
+  int before = row;
+  if (before < 0) before = parent.isValid() ? parent.row() : rows_;  // onto a page: before it
+  before = std::clamp(before, 0, rows_);
+  // Later: the drag is still running, and the model is about to be reset by the move.
+  QTimer::singleShot(0, this, [this, pages, before] { emit pagesDropped(pages, before); });
+  return false;  // nothing to remove from the source: the window moves the pages itself
+}
+
 ThumbnailPanel::ThumbnailPanel(PageRenderer* renderer, QWidget* parent) : QListView(parent) {
   model_ = new ThumbnailModel(renderer, this);
   setModel(model_);
@@ -63,6 +134,12 @@ ThumbnailPanel::ThumbnailPanel(PageRenderer* renderer, QWidget* parent) : QListV
   setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
   setFrameShape(QFrame::NoFrame);
   verticalScrollBar()->setSingleStep(24);
+  setDragEnabled(true);
+  setAcceptDrops(true);
+  setDropIndicatorShown(true);
+  setDragDropMode(QAbstractItemView::DragDrop);
+  setDefaultDropAction(Qt::MoveAction);
+  connect(model_, &ThumbnailModel::pagesDropped, this, &ThumbnailPanel::pagesDropped);
 
   connect(selectionModel(), &QItemSelectionModel::currentChanged, this, [this](const QModelIndex& cur) {
     if (!syncing_ && cur.isValid()) emit pageActivated(cur.row());
@@ -91,6 +168,17 @@ std::vector<int> ThumbnailPanel::selectedPages() const {
   std::sort(pages.begin(), pages.end());
   if (pages.empty() && currentIndex().isValid()) pages.push_back(currentIndex().row());
   return pages;
+}
+
+void ThumbnailPanel::selectPages(int first, int count) {
+  const QModelIndex a = model_->index(first);
+  const QModelIndex b = model_->index(first + count - 1);
+  if (!a.isValid() || !b.isValid()) return;
+  syncing_ = true;
+  selectionModel()->setCurrentIndex(a, QItemSelectionModel::NoUpdate);
+  selectionModel()->select(QItemSelection(a, b), QItemSelectionModel::ClearAndSelect);
+  scrollTo(a, QAbstractItemView::EnsureVisible);
+  syncing_ = false;
 }
 
 QSize ThumbnailPanel::sizeHint() const {

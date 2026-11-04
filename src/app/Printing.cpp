@@ -67,7 +67,7 @@ bool printPages(QPrinter& printer, const pdfz::Document& doc, int from, int to,
       const double scale = std::min({availW / s.width, availH / s.height, printerDpi / 72.0});
       const int pw = std::max(1, int(std::floor(s.width * scale)));   // the page as rendered,
       const int ph = std::max(1, int(std::floor(s.height * scale)));  // before any turning
-      // Where the page's top-left goes on the paper, centred.
+      // Where the page's top-left goes on the paper, centered.
       const int ox = int(std::lround((area.width() - (turn ? ph : pw)) / 2));
       const int oy = int(std::lround((area.height() - (turn ? pw : ph)) / 2));
 

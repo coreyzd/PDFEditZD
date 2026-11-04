@@ -5,6 +5,7 @@
 //   pdfz-info file.pdf --render 1 out.bmp       render page 1 (1-based) at 96 DPI
 //   pdfz-info file.pdf --render 1 out.bmp --dpi 300
 //   pdfz-info file.pdf --password secret ...
+#include "core/annotations.hpp"
 #include "core/document.hpp"
 #include "core/engine.hpp"
 
@@ -108,6 +109,14 @@ int main(int argc, char** argv) {
     const pdfz::SizeF s = doc->pageSize(i);
     std::printf("  %4d  %7.1f x %7.1f pt  (%.2f x %.2f in)\n", i + 1, s.width, s.height, s.width / 72,
                 s.height / 72);
+    for (const pdfz::Annotation& a : doc->annotations(i)) {
+      std::string text = a.contents.substr(0, 60);
+      for (char& c : text)
+        if (c == '\n' || c == '\r') c = ' ';
+      std::printf("        %-10s at %.0f,%.0f %.0fx%.0f  %s%s%s\n", pdfz::kindName(a.kind), a.rect.left, a.rect.top,
+                  a.rect.width(), a.rect.height(), a.author.empty() ? "" : a.author.c_str(), a.author.empty() ? "" : ": ",
+                  text.c_str());
+    }
   }
   return 0;
 }

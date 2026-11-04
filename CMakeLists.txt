@@ -8,7 +8,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(PDFZ_BUILD_APP      "Build the Qt 6 application (needs Qt 6.4+ Widgets and PrintSupport)" ON)
 option(PDFZ_BUILD_TESTS    "Build unit tests" ON)
-option(PDFZ_SANITIZE       "Build with address + undefined behaviour sanitizers" OFF)
+option(PDFZ_SANITIZE       "Build with address + undefined behavior sanitizers" OFF)
 
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "" FORCE)

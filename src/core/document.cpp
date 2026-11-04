@@ -22,17 +22,14 @@ namespace {
 
 FPDF_DOCUMENT asDoc(void* p) { return static_cast<FPDF_DOCUMENT>(p); }
 
-// FPDF_PAGE that closes itself.
+// A page from the document's cache (not closed here).
 struct PageHandle {
   FPDF_PAGE page = nullptr;
-  PageHandle(FPDF_DOCUMENT doc, int index) : page(FPDF_LoadPage(doc, index)) {}
-  ~PageHandle() {
-    if (page) FPDF_ClosePage(page);
-  }
-  PageHandle(const PageHandle&) = delete;
-  PageHandle& operator=(const PageHandle&) = delete;
+  explicit PageHandle(void* p) : page(static_cast<FPDF_PAGE>(p)) {}
   explicit operator bool() const { return page != nullptr; }
 };
+
+constexpr std::size_t kCachedPages = 4;
 
 OpenError fromPdfiumError(unsigned long e) {
   switch (e) {
@@ -131,11 +128,17 @@ OpenResult Document::open(const std::filesystem::path& path, const std::string& 
 }
 
 OpenResult Document::openMemory(std::vector<std::uint8_t> bytes, const std::string& password) {
+  return openBytes(std::make_shared<const std::vector<std::uint8_t>>(std::move(bytes)), password);
+}
+
+OpenResult Document::openBytes(Bytes bytes, const std::string& password) {
   assert(Engine::running());
+  if (!bytes) return {nullptr, OpenError::Format};
   std::unique_ptr<Document> d(new Document);
   d->bytes_ = std::move(bytes);
+  d->password_ = password;
   std::lock_guard lock(engineMutex());
-  d->doc_ = FPDF_LoadMemDocument64(d->bytes_.data(), d->bytes_.size(),
+  d->doc_ = FPDF_LoadMemDocument64(d->bytes_->data(), d->bytes_->size(),
                                    password.empty() ? nullptr : password.c_str());
   if (!d->doc_) return {nullptr, fromPdfiumError(FPDF_GetLastError())};
   d->refreshPageSizes();
@@ -154,8 +157,30 @@ std::unique_ptr<Document> Document::create() {
 Document::~Document() {
   if (doc_) {
     std::lock_guard lock(engineMutex());
+    dropCachedPages();
     FPDF_CloseDocument(asDoc(doc_));
   }
+}
+
+void* Document::cachedPage(int index) const {
+  for (std::size_t i = 0; i < pages_.size(); ++i)
+    if (pages_[i].first == index) {
+      if (i > 0) std::rotate(pages_.begin(), pages_.begin() + std::ptrdiff_t(i), pages_.begin() + std::ptrdiff_t(i) + 1);
+      return pages_.front().second;
+    }
+  FPDF_PAGE page = FPDF_LoadPage(asDoc(doc_), index);
+  if (!page) return nullptr;
+  if (pages_.size() >= kCachedPages) {
+    FPDF_ClosePage(static_cast<FPDF_PAGE>(pages_.back().second));
+    pages_.pop_back();
+  }
+  pages_.insert(pages_.begin(), {index, page});
+  return page;
+}
+
+void Document::dropCachedPages() const {
+  for (auto& [index, page] : pages_) FPDF_ClosePage(static_cast<FPDF_PAGE>(page));
+  pages_.clear();
 }
 
 void Document::refreshPageSizes() {
@@ -183,7 +208,7 @@ SizeF Document::pageSize(int index) const {
 int Document::pageRotation(int index) const {
   if (index < 0 || index >= pageCount()) return 0;
   std::lock_guard lock(engineMutex());
-  PageHandle page(asDoc(doc_), index);
+  PageHandle page(cachedPage(index));
   return page ? FPDFPage_GetRotation(page.page) * 90 : 0;
 }
 
@@ -215,7 +240,7 @@ Bitmap Document::render(int index, double scale, PixelRect region, unsigned flag
   out.pixels.assign(static_cast<std::size_t>(out.stride) * out.height, 0);
 
   std::lock_guard lock(engineMutex());
-  PageHandle page(asDoc(doc_), index);
+  PageHandle page(cachedPage(index));
   if (!page) return {};
   FPDF_BITMAP bmp = FPDFBitmap_CreateEx(out.width, out.height, FPDFBitmap_BGRA, out.pixels.data(), out.stride);
   if (!bmp) return {};
@@ -242,20 +267,24 @@ Bitmap Document::renderFit(int index, int maxWidth, int maxHeight, unsigned flag
 bool Document::deletePage(int index) {
   if (index < 0 || index >= pageCount()) return false;
   std::lock_guard lock(engineMutex());
+  flushAppearances();
+  dropCachedPages();
   FPDFPage_Delete(asDoc(doc_), index);
   refreshPageSizes();
-  modified_ = true;
+  markEdited();
   return true;
 }
 
 bool Document::insertBlankPage(int index, SizeF size) {
   if (index < 0 || index > pageCount() || size.width <= 0 || size.height <= 0) return false;
   std::lock_guard lock(engineMutex());
+  flushAppearances();
+  dropCachedPages();
   FPDF_PAGE page = FPDFPage_New(asDoc(doc_), index, size.width, size.height);
   if (!page) return false;
   FPDF_ClosePage(page);
   refreshPageSizes();
-  modified_ = true;
+  markEdited();
   return true;
 }
 
@@ -264,11 +293,14 @@ bool Document::importPages(const Document& source, const std::vector<int>& pages
   for (int p : pages)
     if (p < 0 || p >= source.pageCount()) return false;
   std::lock_guard lock(engineMutex());
+  flushAppearances();
+  dropCachedPages();
+  source.flushAppearances();
   if (!FPDF_ImportPagesByIndex(asDoc(doc_), asDoc(source.doc_), pages.data(),
                                static_cast<unsigned long>(pages.size()), index))
     return false;
   refreshPageSizes();
-  modified_ = true;
+  markEdited();
   return true;
 }
 
@@ -280,10 +312,12 @@ bool Document::movePages(const std::vector<int>& pages, int destIndex) {
   for (int p : pages)
     if (p < 0 || p >= n) return false;
   std::lock_guard lock(engineMutex());
+  flushAppearances();
+  dropCachedPages();
   // Checked above, so PDFium's "may be left in an indeterminate state" failure can't happen.
   const bool ok = FPDF_MovePages(asDoc(doc_), pages.data(), static_cast<unsigned long>(count), destIndex);
   refreshPageSizes();
-  modified_ = true;
+  markEdited();
   return ok;
 }
 
@@ -291,15 +325,17 @@ bool Document::setPageRotation(int index, int degrees) {
   if (index < 0 || index >= pageCount()) return false;
   const int quarter = ((static_cast<int>(std::lround(degrees / 90.0)) % 4) + 4) % 4;
   std::lock_guard lock(engineMutex());
-  PageHandle page(asDoc(doc_), index);
+  PageHandle page(cachedPage(index));
   if (!page) return false;
   FPDFPage_SetRotation(page.page, quarter);
+  dropCachedPages();  // a parsed page keeps the size it had
   refreshPageSizes();
-  modified_ = true;
+  markEdited();
   return true;
 }
 
 bool Document::writeTo(std::vector<std::uint8_t>& out) const {
+  flushAppearances();
   out.clear();
   VectorWriter writer(&out);
   return FPDF_SaveAsCopy(asDoc(doc_), &writer, FPDF_NO_INCREMENTAL) != 0;
@@ -309,6 +345,14 @@ std::vector<std::uint8_t> Document::saveToMemory() const {
   std::vector<std::uint8_t> out;
   std::lock_guard lock(engineMutex());
   if (!writeTo(out)) out.clear();
+  return out;
+}
+
+Bytes Document::snapshot() const {
+  if (!edited_ && bytes_) return bytes_;
+  auto out = std::make_shared<std::vector<std::uint8_t>>();
+  std::lock_guard lock(engineMutex());
+  if (!writeTo(*out)) return nullptr;
   return out;
 }
 

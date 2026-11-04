@@ -12,7 +12,7 @@
 # Inputs (-D): OUT (the folder to make), EXES (;-list of programs), PLUGINS_DIR (Qt's
 # plugins folder), DLL_DIRS (;-list of folders the DLLs come from), OBJDUMP, EXTRA_FILES
 # (;-list copied next to the programs, e.g. LICENSE), LICENSE_DIRS (;-list of third-party
-# licence files or folders, copied into licenses/).
+# license files or folders, copied into licenses/).
 cmake_minimum_required(VERSION 3.21)
 # Newer CMake: normalize paths (C:\WINDOWS\system32 -> C:/WINDOWS/system32) before the
 # exclude patterns below; they accept either separator, so this only quiets the warning.

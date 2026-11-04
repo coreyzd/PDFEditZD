@@ -1,10 +1,16 @@
 add_library(pdfz_core STATIC
   engine.cpp
   document.cpp
+  history.cpp
+  text.cpp
+  annotations.cpp
 )
 target_include_directories(pdfz_core PUBLIC ${PROJECT_SOURCE_DIR}/src)
 target_link_libraries(pdfz_core PUBLIC PDFium::pdfium PRIVATE pdfz_warnings)
 target_compile_definitions(pdfz_core PRIVATE PDFZ_PDFIUM_VERSION="${PDFZ_PDFIUM_VERSION}")
+# PDFium's headers include <windows.h> on Windows: keep its min/max (and near/far) macros and
+# the rest of the Windows API out of the way of everything that includes them.
+target_compile_definitions(pdfz_core PUBLIC $<$<PLATFORM_ID:Windows>:NOMINMAX WIN32_LEAN_AND_MEAN>)
 # PDFium's headers aren't ours to fix.
 get_target_property(_pdfium_inc PDFium::pdfium INTERFACE_INCLUDE_DIRECTORIES)
 target_include_directories(pdfz_core SYSTEM PUBLIC ${_pdfium_inc})

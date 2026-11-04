@@ -62,7 +62,7 @@ int main(int argc, char** argv) {
   args.setApplicationDescription("A lightweight PDF viewer and editor");
   args.addHelpOption();
   args.addVersionOption();
-  args.addPositionalArgument("file", "The PDF to open");
+  args.addPositionalArgument("files", "PDFs to open", "[files...]");
   args.process(app);
 
   // PDFium runs for as long as the app; the window (and every document) closes before it stops.
@@ -71,7 +71,7 @@ int main(int argc, char** argv) {
   {
     MainWindow window;
     window.show();
-    if (!args.positionalArguments().isEmpty()) window.openFile(args.positionalArguments().first());
+    for (const QString& file : args.positionalArguments()) window.openFile(file);
     rc = QApplication::exec();
   }
   return rc;
