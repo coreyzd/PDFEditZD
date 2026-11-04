@@ -238,7 +238,8 @@ void DocumentTab::addAnnotation(int page, pdfz::Annotation a) {
         added = d.addAnnotation(page, a);
         return added >= 0;
       })) {
-    if (!pdfz::isTextMarkup(a.kind)) view_->selectAnnotation(page, added, false);
+    // Not while filling in a form: the tool goes on to the next field.
+    if (!pdfz::isTextMarkup(a.kind) && !view_->isFillingIn()) view_->selectAnnotation(page, added, false);
   }
 }
 
@@ -250,7 +251,7 @@ void DocumentTab::addStamp(int page, pdfz::Annotation a, const pdfz::StampDrawin
   if (applyEdit(tr("Add %1").arg(kindLabel(a)), page, Scope::Annotations, [&](pdfz::Document& d) {
         added = d.addStamp(page, a, drawing);
         return added >= 0;
-      }))
+      }) && !view_->isFillingIn())
     view_->selectAnnotation(page, added, false);
 }
 
@@ -341,7 +342,7 @@ void DocumentTab::onTextEditFinished(int page, int index, pdfz::Annotation a, bo
   if (!changed || !before.bytes) {
     doc_->setAnnotationHidden(page, index, false);
     refreshRendering(page);
-    view_->selectAnnotation(page, index, false);
+    if (!view_->isFillingIn()) view_->selectAnnotation(page, index, false);
     return;
   }
   if (empty) {  // all the text deleted: so is the box
@@ -362,7 +363,7 @@ void DocumentTab::onTextEditFinished(int page, int index, pdfz::Annotation a, bo
   }
   history_.push(std::move(before), tr("Edit Text Box").toStdString());
   refresh(Scope::Annotations, page, page);
-  view_->selectAnnotation(page, now, false);
+  if (!view_->isFillingIn()) view_->selectAnnotation(page, now, false);
 }
 
 void DocumentTab::deleteAnnotation(int page, int index) {

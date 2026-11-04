@@ -84,6 +84,9 @@ public:
   // isn't in the document yet (it's added when the typing ends, if it has any text).
   bool isEditingText() const { return editor_ != nullptr; }
   bool isEditingNewText() const { return editor_ != nullptr && editIndex_ < 0; }
+  // A Fill & Sign tool is in use: it stays in use after each thing it places, so a form can be
+  // filled in one click after another.
+  bool isFillingIn() const { return tool_ == Tool::Markup && isFillSignTool(markupTool_); }
   void startTextEdit(int page, int index, const pdfz::Annotation& a);
   // Ends the typing: emits textEditFinished. Nothing happens if there's none.
   void commitTextEdit();
@@ -204,7 +207,7 @@ private:
   void finishCreate();
   void paintOverlays(QPainter& p);
   void layoutEditor(bool restyle);  // over the box, at the zoom; `restyle`: font and colors too
-  void fitEditorHeight();
+  void fitEditorHeight();  // and, for text typed on a form, its width
   // Form fields.
   bool fieldUnder(QPointF viewportPos, int& page, int& listPos) const;
   void activateField(int page, const pdfz::FormField& f);  // what a click (or Space) does
@@ -256,6 +259,8 @@ private:
   pdfz::Annotation editAnnot_;
   pdfz::Annotation editOriginal_;
   quint64 editGeneration_ = 0;  // tells a stale editor's late signals apart
+  bool editAutoWidth_ = false;  // Fill & Sign text: as wide as its longest line
+  double editMinWidth_ = 0;     // ...but at least this (points)
   // Placing a stamp.
   pdfz::Annotation placeStamp_;
   pdfz::StampDrawing placeDrawing_;

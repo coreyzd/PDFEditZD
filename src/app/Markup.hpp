@@ -111,6 +111,8 @@ bool isArrow(const pdfz::Annotation& a);
 QFont fontFor(const std::string& pdfFontName, double pixelSize);
 // Inside a text box: the space between its edge and the text, in points.
 double textBoxPadding(const pdfz::Annotation& a);
+// How narrow text typed on a form (Fill & Sign) starts out: room for a character or two.
+double fillTextMinWidth(const pdfz::Annotation& a);
 
 QString toolName(MarkupTool t);   // "Highlight", "Text Box"...
 QString toolKey(MarkupTool t);    // for settings: "highlight", "textbox"...

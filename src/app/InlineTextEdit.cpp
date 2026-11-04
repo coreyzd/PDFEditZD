@@ -4,9 +4,12 @@
 #include <QAbstractTextDocumentLayout>
 #include <QApplication>
 #include <QFocusEvent>
+#include <QFontMetricsF>
 #include <QKeyEvent>
 #include <QTextDocument>
 #include <QTextOption>
+
+#include <algorithm>
 
 InlineTextEdit::InlineTextEdit(QWidget* parent) : QTextEdit(parent) {
   setAcceptRichText(false);  // pasting brings the text, not its formatting
@@ -38,11 +41,28 @@ void InlineTextEdit::setLook(const QFont& font, const QColor& textColor, int ali
   document()->setDocumentMargin(padding);
   QTextOption opt = document()->defaultTextOption();
   opt.setAlignment(align == 1 ? Qt::AlignHCenter : align == 2 ? Qt::AlignRight : Qt::AlignLeft);
-  opt.setWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
+  opt.setWrapMode(lineWrapMode() == QTextEdit::NoWrap ? QTextOption::NoWrap : QTextOption::WrapAtWordBoundaryOrAnywhere);
   document()->setDefaultTextOption(opt);
 }
 
 double InlineTextEdit::contentHeight() const { return document()->size().height(); }
+
+void InlineTextEdit::setAutoWidth(bool on) {
+  const auto mode = on ? QTextEdit::NoWrap : QTextEdit::WidgetWidth;
+  if (lineWrapMode() == mode) return;
+  setLineWrapMode(mode);
+  // The document's own option decides too (setLook sets it).
+  QTextOption opt = document()->defaultTextOption();
+  opt.setWrapMode(on ? QTextOption::NoWrap : QTextOption::WrapAtWordBoundaryOrAnywhere);
+  document()->setDefaultTextOption(opt);
+}
+
+double InlineTextEdit::textWidth() const {
+  const QFontMetricsF fm(document()->defaultFont());
+  double w = 0;
+  for (const QString& line : toPlainText().split(QLatin1Char('\n'))) w = std::max(w, fm.horizontalAdvance(line));
+  return w;
+}
 
 void InlineTextEdit::keyPressEvent(QKeyEvent* e) {
   if (e->key() == Qt::Key_Escape) {

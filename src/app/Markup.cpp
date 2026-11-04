@@ -377,6 +377,8 @@ QFont fontFor(const std::string& name, double pixelSize) {
 
 double textBoxPadding(const pdfz::Annotation& a) { return 2 + std::max(0.0, a.borderWidth); }
 
+double fillTextMinWidth(const pdfz::Annotation& a) { return 1.2 * a.fontSize + 2 * textBoxPadding(a); }
+
 QString commentAuthor() {
   const QString set = QSettings().value("comments/author").toString().trimmed();
   if (!set.isEmpty()) return set;

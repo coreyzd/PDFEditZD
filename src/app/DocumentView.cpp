@@ -605,6 +605,15 @@ void DocumentView::mousePressEvent(QMouseEvent* e) {
         a.rect = {x, y, x + 20, y + 20};
         applyStyle(a, markupStyle_);
         emit annotationCreated(page, a);
+      } else if (markupTool_ == MarkupTool::FillText && [&] {
+                   int ap, al;
+                   if (!annotationUnder(pos, ap, al)) return false;
+                   const pdfz::Annotation& hit = (*annots_->get(ap))[std::size_t(al)];
+                   if (hit.kind != pdfz::AnnotKind::FreeText) return false;
+                   emit annotationEditRequested(ap, hit.index);  // type in it again
+                   return true;
+                 }()) {
+        // done
       } else if (markSubject(markupTool_)) {
         placeMark(page, pt);
       } else if (markupTool_ == MarkupTool::Date) {
@@ -761,7 +770,9 @@ void DocumentView::finishCreate() {
       if (box.width() < 12 || box.height() < 8) {  // a click: a box for a line of text there
         const pdfz::SizeF s = doc->pageSize(dragPage_);
         const double line = QFontMetricsF(fontFor(a.fontName, 1000)).height() / 1000 * a.fontSize;
-        const double w = std::min(200.0, s.width), h = std::min(line + 2 * textBoxPadding(a), s.height);
+        // Text on a form starts narrow and grows as it's typed; a text box has a usual width.
+        const double wanted = markupTool_ == MarkupTool::FillText ? fillTextMinWidth(a) : 200.0;
+        const double w = std::min(wanted, s.width), h = std::min(line + 2 * textBoxPadding(a), s.height);
         // Added text starts where the click was, a little up so the line sits on it.
         const double top = markupTool_ == MarkupTool::FillText ? p0.y - h / 2 : p0.y;
         const double x = std::clamp(p0.x, 0.0, s.width - w), y = std::clamp(top, 0.0, s.height - h);
@@ -1191,8 +1202,11 @@ void DocumentView::startTextEdit(int page, int index, const pdfz::Annotation& a)
   editAnnot_.rect = a.rect.normalized();
   editAnnot_.hidden = false;
   editOriginal_ = editAnnot_;
+  editAutoWidth_ = a.kind == pdfz::AnnotKind::FreeText && (a.subject == "Fill Text" || a.subject == "Date");
+  editMinWidth_ = editAutoWidth_ ? std::min(fillTextMinWidth(editAnnot_), editAnnot_.rect.width()) : 0;
   const quint64 gen = ++editGeneration_;
   editor_ = new InlineTextEdit(viewport());
+  editor_->setAutoWidth(editAutoWidth_);
   editor_->setPlainText(QString::fromStdString(a.contents));
   connect(editor_, &InlineTextEdit::finished, this, [this, gen] {
     if (gen == editGeneration_) commitTextEdit();
@@ -1219,6 +1233,7 @@ void DocumentView::commitTextEdit() {
   const pdfz::Annotation& o = editOriginal_;
   const pdfz::Annotation& n = editAnnot_;
   const bool changed = n.contents != o.contents || std::abs(n.rect.bottom - o.rect.bottom) > 0.01 ||
+                       std::abs(n.rect.right - o.rect.right) > 0.01 ||
                        n.color != o.color || n.hasFill != o.hasFill || (n.hasFill && n.fill != o.fill) ||
                        n.opacity != o.opacity || n.borderWidth != o.borderWidth || n.fontSize != o.fontSize ||
                        n.fontName != o.fontName || n.textColor != o.textColor || n.align != o.align;
@@ -1261,12 +1276,30 @@ void DocumentView::layoutEditor(bool restyle) {
 void DocumentView::fitEditorHeight() {
   if (!editor_ || editPage_ < 0 || !renderer_->document()) return;
   const double ppp = pagePixelsPerPoint(editPage_);
+  const pdfz::SizeF page = renderer_->document()->pageSize(editPage_);
+  bool changed = false;
+  if (editAutoWidth_) {
+    // As wide as the longest line, with room for the caret, up to the page's edge, where the
+    // text starts to wrap.
+    const double pad = textBoxPadding(editAnnot_);
+    const double slack = editAnnot_.fontSize * 0.6;
+    const double wanted = std::max(editMinWidth_, editor_->textWidth() / ppp + 2 * pad + slack);
+    const double room = std::max(editMinWidth_, page.width - editAnnot_.rect.left);
+    const double width = std::min(wanted, room);
+    editor_->setAutoWidth(wanted <= room);
+    if (std::abs(editAnnot_.rect.left + width - editAnnot_.rect.right) >= 0.01) {
+      editAnnot_.rect.right = editAnnot_.rect.left + width;
+      changed = true;
+    }
+  }
   const double needed = editor_->contentHeight() / ppp;
-  const double pageH = renderer_->document()->pageSize(editPage_).height;
   const double height = std::max(editOriginal_.rect.height(), needed);
-  const double bottom = std::min(pageH, editAnnot_.rect.top + height);
-  if (std::abs(bottom - editAnnot_.rect.bottom) < 0.01) return;
-  editAnnot_.rect.bottom = bottom;
+  const double bottom = std::min(page.height, editAnnot_.rect.top + height);
+  if (std::abs(bottom - editAnnot_.rect.bottom) >= 0.01) {
+    editAnnot_.rect.bottom = bottom;
+    changed = true;
+  }
+  if (!changed) return;
   layoutEditor(false);
   viewport()->update();
 }

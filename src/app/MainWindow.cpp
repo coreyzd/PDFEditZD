@@ -275,7 +275,8 @@ void MainWindow::connectTab(DocumentTab* t) {
   // So is a text box, as soon as it's being typed in.
   connect(v, &DocumentView::textEditStarted, this, [this, t] {
     if (t != tab()) return;
-    if (!selectToolAct_->isChecked()) selectToolAct_->trigger();
+    // Fill & Sign's Add Text stays in use, so a form fills in one click after another.
+    if (!selectToolAct_->isChecked() && !t->view()->isFillingIn()) selectToolAct_->trigger();
     updateStyleControls();
   });
   connect(v, &DocumentView::textEditFinished, this, [this, t] {
