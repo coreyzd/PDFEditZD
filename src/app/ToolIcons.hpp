@@ -14,6 +14,9 @@ QIcon selectToolIcon(const QPalette& palette);  // an arrow pointer
 QIcon handToolIcon(const QPalette& palette);    // an open hand
 QIcon signIcon(const QPalette& palette);        // a pen over a signature
 QIcon stampIcon(const QPalette& palette);       // a rubber stamp
+QIcon editPdfIcon(const QPalette& palette);     // a page of text with a pencil
+QIcon addTextIcon(const QPalette& palette);     // a "T" in a dotted box
+QIcon addImageIcon(const QPalette& palette);    // a picture: hills and the sun
 // A square of `color` with a frame, for color buttons and menus; crossed out if `color` is
 // invalid (no fill).
 QIcon colorIcon(const QColor& color);

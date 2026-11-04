@@ -26,6 +26,7 @@ public:
   void setDocument(std::shared_ptr<pdfz::Document> doc);
   // The page's text, extracted on first use; null for a page that doesn't exist.
   std::shared_ptr<const pdfz::PageText> get(int page);
+  void invalidate(int page) { cache_.remove(page); }  // its content was edited
 
 private:
   std::shared_ptr<pdfz::Document> doc_;

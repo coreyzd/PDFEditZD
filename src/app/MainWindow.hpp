@@ -112,6 +112,17 @@ private:
   void saveFlattened();
   void fillStampMenu(QMenu* menu);
   void placeStamp(const MadeStamp& stamp, const QString& subject);
+  // Edit PDF.
+  struct EditStyleChange {
+    std::optional<QString> family = {};
+    std::optional<double> size = {};
+    std::optional<QColor> color = {};
+    std::optional<bool> bold = {};
+    std::optional<bool> italic = {};
+  };
+  void changeEditStyle(const EditStyleChange& change);  // the text typed in, selected, or new
+  void updateEditControls();
+  void addImage();
 
   QStackedWidget* central_;
   QWidget* welcome_;
@@ -159,6 +170,18 @@ private:
   QAction* stampAct_;
   QAction* highlightFieldsAct_;
   QToolBar* fillBar_;
+  QAction* editAct_;
+  QAction* addTextAct_;
+  QAction* addImageAct_;
+  QToolBar* editBar_;
+  QComboBox* editFontCombo_;
+  QComboBox* editSizeCombo_;
+  QToolButton* editColorButton_;
+  QAction* editBoldAct_;
+  QAction* editItalicAct_;
+  EditFont newTextFont_;   // what Add Text types in
+  double newTextSize_ = 12;
+  QColor newTextColor_ = Qt::black;
   QMenu* signMenu_;
   QAction* selectToolAct_;
   QAction* handToolAct_;

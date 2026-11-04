@@ -6,6 +6,7 @@
 // and the document tab adds it as an undoable edit.
 #pragma once
 
+#include "ContentEdit.hpp"
 #include "Forms.hpp"
 #include "Markup.hpp"
 
@@ -22,6 +23,7 @@
 #include <vector>
 
 class AnnotationCache;
+class ContentCache;
 class FieldCache;
 class InlineTextEdit;
 class PageRenderer;
@@ -37,11 +39,12 @@ public:
   // Select: click a comment to select it (and drag to move it), drag over text to select it,
   // drag anywhere else to move the pages. Hand: dragging always moves the pages. Markup: the
   // markup tool set with setMarkupTool(). Place: a click puts down the stamp given to
-  // startPlacing() (a signature), then it's back to Select.
-  enum class Tool { Select, Hand, Markup, Place };
+  // startPlacing() (a signature), then it's back to Select. Edit: Edit PDF, the page's own
+  // text and pictures.
+  enum class Tool { Select, Hand, Markup, Place, Edit };
 
   DocumentView(PageRenderer* renderer, TextCache* text, TextSearch* search, AnnotationCache* annots,
-               FieldCache* fields, QWidget* parent = nullptr);
+               FieldCache* fields, ContentCache* content, QWidget* parent = nullptr);
 
   // The document (or its pages) changed: lay it out again, keeping the current page in view
   // when `keepPosition` is set, otherwise starting at the top.
@@ -104,6 +107,30 @@ public:
   // Ends typing in a form field: emits fieldTextChanged if the text changed.
   void commitFieldEdit();
 
+  // Edit PDF. With the Edit tool, blocks of the page's text and its pictures show with a
+  // frame: click one to select it (drag to move it, a picture's corners to resize it, Delete
+  // to remove it), click selected text to type in it. With "add text" on, a click starts new
+  // text there.
+  void setEditAddText(bool on);
+  bool editAddText() const { return editAddText_; }
+  void setNewTextStyle(const EditFont& font, double size, const QColor& color) {
+    editNewFont_ = font;
+    editNewSize_ = size;
+    editNewColor_ = color;
+  }
+  void contentChanged(int page);  // the cache has been told: repaint
+  bool selectedContent(int& page, pdfz::ContentBlock& block) const;
+  void selectContentAt(int page, pdfz::PointF point);  // the block there, if any
+  void clearContentSelection();
+  // Typing in text: an existing block's (which the tab has hidden) or new.
+  void startContentEdit(const TextEditing& editing);
+  void commitContentEdit();
+  bool isEditingContent() const { return contentEditor_ != nullptr; }
+  const TextEditing* contentEditing() const { return contentEditor_ ? &editing_ : nullptr; }
+  void restyleContentEdit(const EditFont& font, double size, const QColor& color);
+  // Where new text or a picture would go: the middle of what's showing of the current page.
+  bool visibleCenter(int& page, pdfz::PointF& point) const;
+
   // Text selection. It may run across pages.
   bool hasSelection() const;
   QString selectedText() const;  // pages joined by line breaks
@@ -142,6 +169,15 @@ signals:
   void fieldChoiceRequested(int page, int index, int option);
   // A click on a signature field: sign there.
   void signatureFieldClicked(int page, const pdfz::RectF& rect);
+  // Edit PDF.
+  void contentSelectionChanged();
+  void contentMoved(int page, const std::vector<int>& objects, double dx, double dy);
+  void contentResized(int page, const std::vector<int>& objects, const pdfz::RectF& from, const pdfz::RectF& to);
+  void contentDeleteRequested(int page, const std::vector<int>& objects);
+  void contentEditRequested(int page, const pdfz::ContentBlock& block);
+  void contentEditStarted();
+  void contentEditFinished(const TextEditing& editing, const QString& text);
+  void editAddTextEnded();  // a click placed the new text: "add text" is off again
 
 protected:
   void paintEvent(QPaintEvent*) override;
@@ -217,6 +253,15 @@ private:
   void setFieldFocus(int page, int index);
   const pdfz::FormField* focusedField() const;
   void layoutFieldEditor(bool restyle);
+  // Edit PDF.
+  bool contentUnder(QPointF viewportPos, int& page, int& listPos) const;
+  int contentHandleUnder(QPointF viewportPos) const;  // a selected picture's corners
+  pdfz::RectF contentDragRect() const;  // the selected block as the drag has it
+  void editPress(QMouseEvent* e);
+  void startNewText(int page, QPointF point);
+  void layoutContentEditor(bool restyle);
+  void fitContentEditor();
+  void paintContent(QPainter& p);
 
   PageRenderer* renderer_;
   TextCache* text_;
@@ -228,7 +273,7 @@ private:
   int selPage_ = -1;   // the selected annotation
   int selIndex_ = -1;
   // A drag in progress on page dragPage_, in its display points.
-  enum class Drag { None, MoveAnnot, ResizeAnnot, Create };
+  enum class Drag { None, MoveAnnot, ResizeAnnot, Create, MoveContent, ResizeContent };
   Drag drag_ = Drag::None;
   int dragPage_ = -1;
   QPointF dragStart_;
@@ -277,4 +322,16 @@ private:
   quint64 fieldGeneration_ = 0;
   int focusPage_ = -1;   // the field with the keyboard (Tab, Space), if any
   int focusIndex_ = -1;
+  // Edit PDF.
+  ContentCache* content_;
+  bool editAddText_ = false;
+  bool editPressWasSelected_ = false;  // the block pressed on was selected already
+  int contentPage_ = -1;           // the selected block
+  pdfz::ContentBlock contentSel_;
+  InlineTextEdit* contentEditor_ = nullptr;
+  TextEditing editing_;
+  quint64 contentGeneration_ = 0;
+  EditFont editNewFont_{QStringLiteral("Helvetica")};  // for new text
+  double editNewSize_ = 12;
+  QColor editNewColor_ = Qt::black;
 };

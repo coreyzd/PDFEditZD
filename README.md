@@ -7,7 +7,7 @@ icon, nothing installed or registered.
 Built with C++20, Qt 6 Widgets and [PDFium](https://pdfium.googlesource.com/pdfium/) (the PDF
 engine in Chrome). Windows comes first, through MSYS2. It builds on Linux too.
 
-Status: **phase 2 (Fill & Sign, stamps, extract and split)** done; phase 3 (export to Word and Excel) next.
+Status: **phase 3 (Edit PDF, a new print dialog, Word and picture import)** done. Export to Word and Excel is planned for a later update.
 
 ## What works
 
@@ -16,6 +16,7 @@ Status: **phase 2 (Fill & Sign, stamps, extract and split)** done; phase 3 (expo
 | Viewing | Continuous scrolling, rendered in tiles on a worker thread, with a quick preview while tiles arrive. Zooming shows the page at its old sharpness until the new tiles are in, and an edit keeps showing the page as it was until it's redrawn, so nothing flashes blank. Fit width, fit page, actual size, zoom from 8% to 6400% (Ctrl+wheel zooms at the cursor). |
 | Tabs | Each document opens in its own tab, with its own thumbnails, comments, undo and find results. Ctrl+Tab / Ctrl+Shift+Tab switch tabs and Ctrl+W closes one. Opening a file that's already open goes to its tab. While nothing is open, a welcome page lists recent files. |
 | Tools | Select tool (V): click a comment to select it (and drag to move it), drag over text to select it, or drag anywhere else to move the page. Hand tool (H): dragging always moves the page. The middle button always moves the page. Esc steps back: out of a drag, then the selection, then to the Select tool. |
+| Edit PDF | Edit PDF (on the main toolbar, or Edit > Edit PDF) changes the page's own content, as in Acrobat. The page's text shows in dotted boxes, gathered the way it reads: lines into paragraphs. Click a box to select it and drag to move it; Delete removes it. Click selected text again (or double-click it) to type in it, right on the page: a paragraph wraps again to its width as you type, and a single line grows. Deleting all of a box's text deletes the box. Pictures can be moved, resized by their corners (keeping their shape) and deleted. Add Text starts new text where you click; Add Image puts a picture (JPEG, PNG and the like) in the middle of the page, ready to move or resize. The Edit PDF toolbar's font, size, color, Bold and Italic change the text being typed in, the selected box, or what Add Text types next. Text in PDF's standard fonts (Helvetica/Arial, Times, Courier) is written with them; other fonts, and characters the standard fonts lack, are embedded from the computer's font files. Every change is one undo step. Text that's turned or slanted, and text on rotated pages, can be moved but not typed in. |
 | Comments | A Comment Tools toolbar has Highlight, Underline, Strikethrough (drag over text, or select text first and use Ctrl+Shift+H/U/X), Sticky Note, Text Box, Pen, Rectangle, Ellipse, Line and Arrow. Selected comments can be moved, and rectangles, ellipses and text boxes resized by their corners. The toolbar's style controls (color, fill color or no fill, opacity, line width, and for text boxes font, size, text color and alignment) change the selected comment, or what the tool makes next; a fill can be added or taken away at any time. Arrowheads grow with the line width, as in Acrobat. Text boxes are typed in right on the page: click (or drag out a box) and type, and the box grows as the text does. Double-click one to type in it again; Esc or a click elsewhere finishes. Double-click any other comment to edit its text, press Delete to remove it, or right-click for a menu. Hovering shows a comment's text. Every change can be undone. |
 | Stamps | The Stamp button on the Comment Tools toolbar has Acrobat's stamps (Approved, Reviewed, Received and Revised say who stamped and when; Draft, Final, Confidential, Void and the rest), and pictures of your own saved as stamps. Click to place one; it can be moved and resized (keeping its shape) like any comment. |
 | Form fields | Fillable PDF forms: fields are tinted (Fill & Sign > Highlight Form Fields). With the Select tool, click a text field to type in it on the page, click check boxes and radio buttons to set them, and pick from drop-down and list boxes. Tab and Shift+Tab go from field to field (Space sets a check box or opens a list). Each change is one undo step, read-only fields stay as they are, and other readers show the values as filled in. |
@@ -25,9 +26,9 @@ Status: **phase 2 (Fill & Sign, stamps, extract and split)** done; phase 3 (expo
 | Find | Ctrl+F opens a find bar that searches as you type, on a thread of its own, so the window stays responsive on documents of thousands of pages. Every match is highlighted. Enter/F3 goes to the next match and Shift+Enter/Shift+F3 to the previous one. Match case and Whole words options. A phrase is found even where it wraps to the next line. |
 | Navigation | Page thumbnails (F4), page number box, Home/End, Left/Right, Space/Shift+Space |
 | Files | Open (and drag and drop), password-protected files, Open Recent, Save, Save As. Saves go to a temporary file first, then replace the original. |
-| Pages | Drag thumbnails to reorder (several at once with Ctrl/Shift-click). Insert a blank page, insert the pages of another PDF, rotate, delete (Delete key in the thumbnails). Extract Pages saves pages (like "1-3, 5, 8-") as a new PDF, or each as a file of its own, and can delete them here afterwards. Split Document saves the document as several PDFs of so many pages each. Extracted pages keep their form fields. |
+| Pages | Drag thumbnails to reorder (several at once with Ctrl/Shift-click). Insert a blank page, or Insert Pages from File: PDFs, Word documents (.docx, .doc, .rtf; converted with Microsoft Word, or LibreOffice if Word isn't installed) and pictures (each becomes a page the size of the page it goes after), several files at once. Rotate, delete (Delete key in the thumbnails). Extract Pages saves pages (like "1-3, 5, 8-") as a new PDF, or each as a file of its own, and can delete them here afterwards. Split Document saves the document as several PDFs of so many pages each. Extracted pages keep their form fields. |
 | Undo | Ctrl+Z / Ctrl+Y for every page edit. The title bar's modified marker follows undo and redo back to the saved state. |
-| Printing | System print dialog, with page ranges and the current page. Shrinks to fit and auto-rotates landscape pages. Rendered at the printer's resolution. |
+| Printing | A print dialog like Acrobat's: printer and its Properties, copies, grayscale, pages (all, current, a range, in reverse), and a preview of each sheet to flip through. Page Sizing & Handling: Fit, Actual Size, Shrink oversized pages, or a custom scale, and **Choose paper source by PDF page size**, which prints each page on paper of its own size (a 17 x 11 page on Tabloid, from whichever tray holds it). Orientation (auto, portrait, landscape), both sides, and comments and forms printed or not. Page Setup picks the paper size and source (tray) by hand. Rendered at the printer's resolution. |
 
 ## Building on Windows (MSYS2 UCRT64)
 
@@ -95,6 +96,7 @@ src/core          pdfz: PDFium behind a small thread-safe C++ API, with no Qt
                   (Engine; Document: open, render, page edits, save; EditHistory: undo
                   snapshots; PageText: characters and their boxes, hit-testing, selection;
                   annotations: comments, markups and stamps; forms: form fields;
+                  content: the page's own text and pictures, for Edit PDF;
                   geometry: the page frames)
 src/app           the Qt 6 app: MainWindow (menus, toolbars, tabs), DocumentTab (one open
                   document), DocumentView (tiled continuous view, selection, the markup
@@ -103,7 +105,10 @@ src/app           the Qt 6 app: MainWindow (menus, toolbars, tabs), DocumentTab 
                   hit-testing, tool styles, text box appearances), InlineTextEdit (typing
                   in a text box or form field on the page), Forms (field cache), Signatures
                   + SignatureDialog (draw, type or picture; saved ones), Stamps, ToolIcons,
-                  TextSearch (search thread) + FindBar, Printing
+                  TextSearch (search thread) + FindBar, ContentEdit + Fonts (Edit PDF),
+                  Printing (the print dialog) + PrintBackend + WinPrint (Windows printing
+                  through the driver: paper sizes and trays per page), OfficeImport (Word
+                  documents and pictures as pages)
 src/tools         pdfz-info
 tests             doctest unit tests for src/core
 cmake             PDFium download/import, Windows deploy script
@@ -137,6 +142,20 @@ picture with transparency, so they scale cleanly when resized and look the same 
 Saved signatures are kept in `signatures.json` in the app's data folder
 (`%APPDATA%\PDFEditZD\PDFEditZD` on Windows), and picture stamps in `stamps` beside it.
 
+Edit PDF works on the page's content stream through PDFium's page objects. Text objects that
+share a baseline become lines, and lines a regular distance apart, starting at the same left
+edge and in the same size, become a paragraph. Editing a paragraph replaces its objects with
+new ones, laid out with the matching font on the computer (Arial, Liberation Sans or the
+like for Helvetica), so the text wraps where it will print. While a block is typed in, its
+objects are hidden, and the change is one undo step when the typing ends. Embedded fonts are
+added once per document and shared by every edit that uses them.
+
+Printing on Windows goes straight to the printer driver (DEVMODE, `DeviceCapabilities`,
+`ResetDC` before each page), which is what makes a different paper size and tray per page
+possible; Qt's printing can't change the tray. Elsewhere it uses Qt's printing, without trays.
+Word documents are converted to PDF by Word itself, driven from a hidden PowerShell process, so
+the pages look as Word prints them.
+
 Undo keeps whole-document snapshots (the bytes of a PDF) rather than inverse operations.
 PDFium can't put a deleted page back, only import a copy of it, and bookmarks, links and form
 fields pointing at the original page would quietly break. While a document is unedited, its
@@ -149,7 +168,9 @@ oldest first.
    selection, copy and search, markups and comments with a comments panel, tabs.~~ Done.
 2. ~~**Phase 2:** Fill & Sign (form filling, and visible signatures drawn, typed or from a
    picture), stamps, extract and split pages.~~ Done.
-3. **Phase 3:** export to Word and Excel. This is a layout-analysis problem: rebuilding
+3. ~~**Phase 3:** Edit PDF (text and pictures), a print dialog like Acrobat's with paper and
+   tray by page size, and Word documents and pictures in Insert Pages from File.~~ Done.
+4. **Later:** export to Word and Excel. This is a layout-analysis problem: rebuilding
    paragraphs and tables from positioned text. It will be a separate module, and good results
    are expected on simple documents.
 

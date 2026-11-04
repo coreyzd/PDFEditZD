@@ -9,6 +9,9 @@ add_executable(pdfeditzd
   PageRenderer.cpp
   ThumbnailPanel.cpp
   Printing.cpp
+  PrintBackend.cpp
+  OfficeImport.cpp
+  WinPrint.cpp
   TextSearch.cpp
   FindBar.cpp
   DocumentTab.cpp
@@ -17,6 +20,8 @@ add_executable(pdfeditzd
   Forms.cpp
   Signatures.cpp
   Stamps.cpp
+  Fonts.cpp
+  ContentEdit.cpp
   SignatureDialog.cpp
   CommentDialog.cpp
   CommentsPanel.cpp
@@ -34,6 +39,9 @@ endif()
 
 target_link_libraries(pdfeditzd PRIVATE pdfz_core pdfz_warnings
   Qt6::Core Qt6::Gui Qt6::Widgets Qt6::PrintSupport)
+if(WIN32)
+  target_link_libraries(pdfeditzd PRIVATE winspool gdi32)  # WinPrint: printing through the Windows API
+endif()
 
 install(TARGETS pdfeditzd)
 if(NOT WIN32)

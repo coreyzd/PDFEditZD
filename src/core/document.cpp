@@ -21,7 +21,13 @@
 
 namespace pdfz {
 
+namespace detail {
+PageFrame frameOfPage(void* page);
+}  // namespace detail
+
 namespace {
+
+PageFrame pageFrameOf(FPDF_PAGE page) { return detail::frameOfPage(page); }
 
 FPDF_DOCUMENT asDoc(void* p) { return static_cast<FPDF_DOCUMENT>(p); }
 
@@ -188,6 +194,7 @@ Document::~Document() {
     std::lock_guard lock(engineMutex());
     dropCachedPages();
     exitForms();
+    for (auto& [key, font] : fonts_) FPDFFont_Close(static_cast<FPDF_FONT>(font));
     FPDF_CloseDocument(asDoc(doc_));
   }
 }
@@ -419,6 +426,107 @@ bool Document::insertBlankPage(int index, SizeF size) {
   refreshPageSizes();
   exitForms();  // no pages are loaded now
   initForms();
+  markEdited();
+  return true;
+}
+
+namespace {
+
+// PDFium reads a JPEG through this, from memory.
+struct MemoryAccess : FPDF_FILEACCESS {
+  const std::vector<std::uint8_t>* data = nullptr;
+  static int read(void* param, unsigned long pos, unsigned char* buf, unsigned long size) {
+    const auto* self = static_cast<const MemoryAccess*>(param);
+    if (pos + size > self->data->size()) return 0;
+    std::copy_n(self->data->data() + pos, size, buf);
+    return 1;
+  }
+};
+
+}  // namespace
+
+namespace {
+
+// An image object of `image` (not yet placed or on a page), or null.
+FPDF_PAGEOBJECT makeImageObject(FPDF_DOCUMENT doc, FPDF_PAGE page, const Document::PageImage& image) {
+  FPDF_PAGEOBJECT img = FPDFPageObj_NewImageObj(doc);
+  if (!img) return nullptr;
+  bool ok = false;
+  FPDF_PAGE pages[] = {page};
+  if (!image.jpeg.empty()) {
+    MemoryAccess access;
+    access.m_FileLen = static_cast<unsigned long>(image.jpeg.size());
+    access.m_GetBlock = &MemoryAccess::read;
+    access.m_Param = &access;
+    access.data = &image.jpeg;
+    // Inline: the data is copied in now, so nothing has to outlive this call.
+    ok = FPDFImageObj_LoadJpegFileInline(pages, 1, img, &access);
+  } else if (FPDF_BITMAP bmp = FPDFBitmap_Create(image.width, image.height, 0)) {
+    auto* px = static_cast<std::uint8_t*>(FPDFBitmap_GetBuffer(bmp));
+    const int stride = FPDFBitmap_GetStride(bmp);
+    for (int y = 0; y < image.height; ++y)
+      std::copy_n(image.bgra.data() + std::size_t(y) * std::size_t(image.width) * 4, std::size_t(image.width) * 4,
+                  px + std::ptrdiff_t(y) * stride);
+    ok = FPDFImageObj_SetBitmap(pages, 1, img, bmp);
+    FPDFBitmap_Destroy(bmp);
+  }
+  if (!ok) {
+    FPDFPageObj_Destroy(img);
+    return nullptr;
+  }
+  return img;
+}
+
+bool validImage(const Document::PageImage& image) {
+  return image.width > 0 && image.height > 0 &&
+         (!image.jpeg.empty() || image.bgra.size() >= std::size_t(image.width) * std::size_t(image.height) * 4);
+}
+
+}  // namespace
+
+bool Document::insertImagePage(int index, SizeF size, const PageImage& image, double margin) {
+  if (index < 0 || index > pageCount() || size.width <= 0 || size.height <= 0 || !validImage(image)) return false;
+  std::lock_guard lock(engineMutex());
+  flushAppearances();
+  dropCachedPages();
+  FPDF_DOCUMENT doc = asDoc(doc_);
+  FPDF_PAGE page = FPDFPage_New(doc, index, size.width, size.height);
+  if (!page) return false;
+  FPDF_PAGEOBJECT img = makeImageObject(doc, page, image);
+  bool ok = img != nullptr;
+  if (ok) {
+    // As big as fits inside the margins, keeping its shape, in the middle.
+    const double availW = std::max(1.0, size.width - 2 * margin), availH = std::max(1.0, size.height - 2 * margin);
+    const double k = std::min(availW / image.width, availH / image.height);
+    const double w = image.width * k, h = image.height * k;
+    FPDFImageObj_SetMatrix(img, w, 0, 0, h, (size.width - w) / 2, (size.height - h) / 2);
+    FPDFPage_InsertObject(page, img);
+    ok = FPDFPage_GenerateContent(page);
+  }
+  FPDF_ClosePage(page);
+  if (!ok) FPDFPage_Delete(doc, index);
+  refreshPageSizes();
+  exitForms();
+  initForms();
+  if (ok) markEdited();
+  return ok;
+}
+
+bool Document::addContentImage(int pageIndex, const PageImage& image, const RectF& rect) {
+  const RectF r = rect.normalized();
+  if (pageIndex < 0 || pageIndex >= pageCount() || !validImage(image) || r.width() <= 0 || r.height() <= 0) return false;
+  std::lock_guard lock(engineMutex());
+  auto page = static_cast<FPDF_PAGE>(cachedPage(pageIndex));
+  if (!page) return false;
+  FPDF_PAGEOBJECT img = makeImageObject(asDoc(doc_), page, image);
+  if (!img) return false;
+  // The image's unit square onto the rect, upright on the screen whatever the page's /Rotate.
+  const PageFrame f = pageFrameOf(page);
+  const PointF bl = f.toUser(PointF{r.left, r.bottom}), br = f.toUser(PointF{r.right, r.bottom}),
+               tl = f.toUser(PointF{r.left, r.top});
+  FPDFImageObj_SetMatrix(img, br.x - bl.x, br.y - bl.y, tl.x - bl.x, tl.y - bl.y, bl.x, bl.y);
+  FPDFPage_InsertObject(page, img);
+  if (!FPDFPage_GenerateContent(page)) return false;
   markEdited();
   return true;
 }

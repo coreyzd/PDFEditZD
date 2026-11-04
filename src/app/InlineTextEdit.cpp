@@ -7,6 +7,8 @@
 #include <QFontMetricsF>
 #include <QKeyEvent>
 #include <QTextDocument>
+#include <QTextBlockFormat>
+#include <QTextCursor>
 #include <QTextOption>
 
 #include <algorithm>
@@ -55,6 +57,16 @@ void InlineTextEdit::setAutoWidth(bool on) {
   QTextOption opt = document()->defaultTextOption();
   opt.setWrapMode(on ? QTextOption::NoWrap : QTextOption::WrapAtWordBoundaryOrAnywhere);
   document()->setDefaultTextOption(opt);
+}
+
+void InlineTextEdit::setLineHeight(double px) {
+  lineHeight_ = px;
+  QTextCursor c(document());
+  c.select(QTextCursor::Document);
+  QTextBlockFormat f;
+  f.setLineHeight(px, QTextBlockFormat::FixedHeight);
+  c.mergeBlockFormat(f);
+  // New lines typed take the current block's format, so they're spaced the same.
 }
 
 double InlineTextEdit::textWidth() const {

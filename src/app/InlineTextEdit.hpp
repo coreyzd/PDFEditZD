@@ -27,6 +27,8 @@ public:
   // Text typed on a form (Fill & Sign): no wrapping, so the box can grow to fit the longest
   // line; textWidth() is that line's width in pixels (padding not included).
   void setAutoWidth(bool on);
+  // Lines exactly this far apart (pixels), as the page's text was (Edit PDF).
+  void setLineHeight(double px);
   double textWidth() const;
   // A form field: Tab and Shift+Tab move to the next field (tabbed()) instead of typing a tab,
   // and the editor is filled with `background` so the field's old look doesn't show through.
@@ -44,6 +46,7 @@ protected:
 
 private:
   bool formField_ = false;
+  double lineHeight_ = 0;
 };
 
 // A one-line form field being typed in: Enter or Esc ends it, Tab moves on.

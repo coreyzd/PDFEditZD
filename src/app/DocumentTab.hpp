@@ -3,10 +3,12 @@
 // main window shows one tab at a time and sends its menu and toolbar commands to it.
 #pragma once
 
+#include "ContentEdit.hpp"
 #include "Forms.hpp"
 #include "Markup.hpp"
 #include "TextSearch.hpp"
 
+#include "core/document.hpp"
 #include "core/history.hpp"
 
 #include <QColor>
@@ -46,8 +48,9 @@ public:
   bool saveTo(const QString& path);
 
   // What an edit changes, for redrawing: all the pages (and their layout), one page's comments,
-  // or a form field's value (shown on `page`, and wherever else the field is).
-  enum class Scope { Pages, Annotations, Field };
+  // a form field's value (shown on `page`, and wherever else the field is), or one page's own
+  // content (Edit PDF).
+  enum class Scope { Pages, Annotations, Field, Content };
   // An undoable edit: snapshots the document, runs `change` (true if it changed anything), then
   // redraws and shows `page`.
   bool applyEdit(const QString& label, int page, Scope scope, const std::function<bool(pdfz::Document&)>& change);
@@ -77,6 +80,12 @@ public:
   void setFieldChecked(int page, int index, bool checked);
   void setFieldChoice(int page, int index, int option);
 
+  // Edit PDF: a picture added to the page's content, filling `rect` (display frame); it's then
+  // selected.
+  void addContentImage(int page, const pdfz::Document::PageImage& image, const pdfz::RectF& rect);
+  // A block of the page's text written again in another font, size or color.
+  void restyleContent(int page, const pdfz::ContentBlock& block, const EditFont& font, double size, const QColor& color);
+
 signals:
   void stateChanged();                // name, modified, undo/redo, page count
   void contentChanged(bool pages);    // after an edit, undo or redo; `pages` if the text may have changed
@@ -90,6 +99,16 @@ private:
   void beginTextEdit(int page, int index);
   void onTextEditFinished(int page, int index, pdfz::Annotation a, bool changed);
   void refreshRendering(int page);  // the page's look changed, but not as an edit
+  // Edit PDF.
+  void moveContent(int page, std::vector<int> objects, double dx, double dy);
+  void resizeContent(int page, std::vector<int> objects, pdfz::RectF from, pdfz::RectF to);
+  void deleteContent(int page, std::vector<int> objects);
+  void beginContentEdit(int page, pdfz::ContentBlock block);
+  void onContentEditFinished(TextEditing editing, const QString& text);
+  void refreshContentRendering(int page);  // hidden or shown again, not as an edit
+  static TextEditing editingFor(int page, const pdfz::ContentBlock& block);
+  // The text laid out for the page; false (and a message) if no font can show it.
+  bool linesFor(const TextEditing& e, const QString& text, pdfz::TextLines& out);
 
   std::shared_ptr<pdfz::Document> doc_;
   QString path_;
@@ -98,6 +117,7 @@ private:
   TextCache textCache_;
   AnnotationCache annots_;
   FieldCache fields_;
+  ContentCache content_;
   TextSearch* search_;
   DocumentView* view_;
   ThumbnailPanel* thumbs_;    // shown in the main window's Pages panel
@@ -105,4 +125,6 @@ private:
   std::shared_ptr<const AnnotationList> keepAlive_;  // for annotation()
   // While a text box already in the document is typed in: the document from before, for undo.
   pdfz::EditHistory::Snapshot textEditBefore_;
+  // The same, while a block of the page's own text is typed in.
+  pdfz::EditHistory::Snapshot contentEditBefore_;
 };

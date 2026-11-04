@@ -37,8 +37,9 @@ const QColor kFieldColor(0xDD, 0xE6, 0xFF);
 }  // namespace
 
 DocumentView::DocumentView(PageRenderer* renderer, TextCache* text, TextSearch* search, AnnotationCache* annots,
-                           FieldCache* fields, QWidget* parent)
-    : QAbstractScrollArea(parent), renderer_(renderer), text_(text), search_(search), annots_(annots), fields_(fields) {
+                           FieldCache* fields, ContentCache* content, QWidget* parent)
+    : QAbstractScrollArea(parent), renderer_(renderer), text_(text), search_(search), annots_(annots), fields_(fields),
+      content_(content) {
   // Always shown, so fitting the width never makes it appear and change the width again.
   setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOn);
   setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
@@ -110,6 +111,7 @@ void DocumentView::relayout() {
   updateScrollBars();
   layoutEditor(true);
   layoutFieldEditor(true);
+  layoutContentEditor(true);
 }
 
 void DocumentView::updateScrollBars() {
@@ -244,6 +246,7 @@ void DocumentView::resizeEvent(QResizeEvent* e) {
 void DocumentView::scrollContentsBy(int, int) {
   layoutEditor(false);
   layoutFieldEditor(false);
+  layoutContentEditor(false);
   updateCurrentPage();
   viewport()->update();
 }
@@ -437,10 +440,11 @@ void DocumentView::keyPressEvent(QKeyEvent* e) {
         viewport()->update();
         return;
       }
-      if (selPage_ >= 0 || hasSelection() || focusPage_ >= 0) {
+      if (selPage_ >= 0 || hasSelection() || focusPage_ >= 0 || contentPage_ >= 0) {
         clearAnnotationSelection();
         clearSelection();
         setFieldFocus(-1, -1);
+        clearContentSelection();
         return;
       }
       if (tool_ != Tool::Select) emit toolResetRequested();
@@ -449,6 +453,13 @@ void DocumentView::keyPressEvent(QKeyEvent* e) {
     case Qt::Key_Backspace:
       if (selPage_ >= 0) {
         emit annotationDeleteRequested(selPage_, selIndex_);
+        return;
+      }
+      if (contentPage_ >= 0) {
+        const int page = contentPage_;
+        const std::vector<int> objs = contentSel_.objects;
+        clearContentSelection();
+        emit contentDeleteRequested(page, objs);
         return;
       }
       break;
@@ -494,7 +505,12 @@ void DocumentView::mousePressEvent(QMouseEvent* e) {
   const bool left = e->button() == Qt::LeftButton;
   commitTextEdit();  // a click outside the box being typed in ends the typing
   commitFieldEdit();
+  commitContentEdit();
   setFocus();
+  if (tool_ == Tool::Edit && e->button() == Qt::LeftButton) {
+    editPress(e);
+    return;
+  }
 
   // The selected comment's corner handles, then the comment itself.
   if (left && tool_ != Tool::Hand) {
@@ -641,6 +657,16 @@ void DocumentView::mousePressEvent(QMouseEvent* e) {
 }
 
 void DocumentView::mouseDoubleClickEvent(QMouseEvent* e) {
+  if (e->button() == Qt::LeftButton && tool_ == Tool::Edit) {
+    int page, pos;
+    if (contentUnder(e->position(), page, pos)) {
+      const pdfz::ContentBlock b = (*content_->get(page))[std::size_t(pos)];
+      drag_ = Drag::None;
+      if (b.kind == pdfz::ContentBlock::Kind::Text && b.editable) emit contentEditRequested(page, b);
+    }
+    e->accept();
+    return;
+  }
   if (e->button() != Qt::LeftButton || tool_ != Tool::Select) return QAbstractScrollArea::mouseDoubleClickEvent(e);
   int page, listPos;
   if (annotationUnder(e->position(), page, listPos)) {
@@ -718,6 +744,7 @@ void DocumentView::mouseMoveEvent(QMouseEvent* e) {
 void DocumentView::mouseReleaseEvent(QMouseEvent* e) {
   if (drag_ != Drag::None && e->button() == Qt::LeftButton) {
     const Drag d = drag_;
+    const pdfz::RectF contentTo = contentDragRect();  // while drag_ still says how
     drag_ = Drag::None;
     if (d == Drag::MoveAnnot && dragMoved_) {
       emit annotationMoved(dragPage_, selIndex_, dragNow_.x() - dragStart_.x(), dragNow_.y() - dragStart_.y());
@@ -726,6 +753,14 @@ void DocumentView::mouseReleaseEvent(QMouseEvent* e) {
       if (r.width() >= 4 && r.height() >= 4) emit annotationResized(dragPage_, selIndex_, r);
     } else if (d == Drag::Create) {
       finishCreate();
+    } else if (d == Drag::MoveContent && dragMoved_) {
+      emit contentMoved(dragPage_, contentSel_.objects, dragNow_.x() - dragStart_.x(), dragNow_.y() - dragStart_.y());
+    } else if (d == Drag::ResizeContent && dragMoved_) {
+      if (contentTo.width() >= 2 && contentTo.height() >= 2)
+        emit contentResized(dragPage_, contentSel_.objects, contentSel_.rect, contentTo);
+    } else if (d == Drag::MoveContent && contentSel_.kind == pdfz::ContentBlock::Kind::Text && contentSel_.editable &&
+               editPressWasSelected_) {
+      emit contentEditRequested(dragPage_, contentSel_);  // a click on selected text: type in it
     }
     inkPoints_.clear();
     viewport()->update();
@@ -848,6 +883,21 @@ void DocumentView::autoScrollStep() {
 }
 
 void DocumentView::updateHoverCursor(QPointF pos) {
+  if (tool_ == Tool::Edit) {
+    const int corner = contentHandleUnder(pos);
+    int page, listPos;
+    if (corner >= 0) viewport()->setCursor(corner == 0 || corner == 3 ? Qt::SizeFDiagCursor : Qt::SizeBDiagCursor);
+    else if (editAddText_) viewport()->setCursor(Qt::IBeamCursor);
+    else if (contentUnder(pos, page, listPos)) {
+      const pdfz::ContentBlock& b = (*content_->get(page))[std::size_t(listPos)];
+      const bool selectedText = page == contentPage_ && b.objects == contentSel_.objects &&
+                                b.kind == pdfz::ContentBlock::Kind::Text && b.editable;
+      viewport()->setCursor(selectedText ? Qt::IBeamCursor : Qt::SizeAllCursor);
+    } else {
+      viewport()->setCursor(Qt::ArrowCursor);
+    }
+    return;
+  }
   const int corner = tool_ != Tool::Hand ? resizeHandleUnder(pos) : -1;
   if (corner >= 0) {
     viewport()->setCursor(corner == 0 || corner == 3 ? Qt::SizeFDiagCursor : Qt::SizeBDiagCursor);
@@ -898,6 +948,10 @@ void DocumentView::updateHoverCursor(QPointF pos) {
 }
 
 void DocumentView::setTool(Tool tool) {
+  if (tool != Tool::Edit) {
+    commitContentEdit();
+    clearContentSelection();
+  }
   tool_ = tool;
   drag_ = Drag::None;
   if (tool != Tool::Select) clearAnnotationSelection();
@@ -1078,6 +1132,7 @@ void DocumentView::paintOverlays(QPainter& p) {
   p.setCompositionMode(QPainter::CompositionMode_SourceOver);
   p.setRenderHint(QPainter::Antialiasing);
   const QColor accent = palette().color(QPalette::Highlight);
+  if (tool_ == Tool::Edit) paintContent(p);
 
   // The selected comment: a dashed frame, with corner handles if it can be resized.
   if (const pdfz::Annotation* a = selected()) {
@@ -1302,6 +1357,272 @@ void DocumentView::fitEditorHeight() {
   if (!changed) return;
   layoutEditor(false);
   viewport()->update();
+}
+
+// ---------------------------------------------------------------------------------------------
+// Edit PDF
+
+void DocumentView::setEditAddText(bool on) {
+  editAddText_ = on;
+  if (on) clearContentSelection();
+  updateHoverCursor(viewport()->mapFromGlobal(QCursor::pos()));
+}
+
+void DocumentView::contentChanged(int page) {
+  // The selected block may have changed: find it again by its first object.
+  if (page == contentPage_) {
+    bool found = false;
+    for (const pdfz::ContentBlock& b : *content_->get(page))
+      if (!contentSel_.objects.empty() && std::find(b.objects.begin(), b.objects.end(), contentSel_.objects.front()) != b.objects.end() &&
+          b.kind == contentSel_.kind) {
+        contentSel_ = b;
+        found = true;
+        break;
+      }
+    if (!found) clearContentSelection();
+  }
+  viewport()->update();
+}
+
+bool DocumentView::selectedContent(int& page, pdfz::ContentBlock& block) const {
+  if (contentPage_ < 0) return false;
+  page = contentPage_;
+  block = contentSel_;
+  return true;
+}
+
+void DocumentView::selectContentAt(int page, pdfz::PointF pt) {
+  const auto list = content_->get(page);
+  const int i = blockAt(*list, pt.x, pt.y, 1);
+  if (i < 0) {
+    clearContentSelection();
+    return;
+  }
+  contentPage_ = page;
+  contentSel_ = (*list)[std::size_t(i)];
+  viewport()->update();
+  emit contentSelectionChanged();
+}
+
+void DocumentView::clearContentSelection() {
+  if (contentPage_ < 0) return;
+  contentPage_ = -1;
+  contentSel_ = {};
+  viewport()->update();
+  emit contentSelectionChanged();
+}
+
+bool DocumentView::contentUnder(QPointF vp, int& page, int& listPos) const {
+  QPointF pt;
+  if (!pagePointAt(vp, page, pt, false)) return false;
+  listPos = blockAt(*content_->get(page), pt.x(), pt.y(), 2 / pagePixelsPerPoint(page));
+  return listPos >= 0;
+}
+
+int DocumentView::contentHandleUnder(QPointF vp) const {
+  if (contentPage_ < 0 || contentSel_.kind != pdfz::ContentBlock::Kind::Image) return -1;
+  const QRectF r = toViewport(contentPage_, contentSel_.rect);
+  const QPointF corners[] = {r.topLeft(), r.topRight(), r.bottomLeft(), r.bottomRight()};
+  for (int i = 0; i < 4; ++i)
+    if (std::abs(vp.x() - corners[i].x()) <= 6 && std::abs(vp.y() - corners[i].y()) <= 6) return i;
+  return -1;
+}
+
+pdfz::RectF DocumentView::contentDragRect() const {
+  pdfz::RectF r = contentSel_.rect;
+  const double dx = dragNow_.x() - dragStart_.x(), dy = dragNow_.y() - dragStart_.y();
+  if (drag_ == Drag::MoveContent) return {r.left + dx, r.top + dy, r.right + dx, r.bottom + dy};
+  if (drag_ != Drag::ResizeContent) return r;
+  const pdfz::RectF start = r;
+  const bool left = resizeCorner_ == 0 || resizeCorner_ == 2, top = resizeCorner_ == 0 || resizeCorner_ == 1;
+  if (left) r.left += dx; else r.right += dx;
+  if (top) r.top += dy; else r.bottom += dy;
+  // A picture keeps its shape.
+  if (start.width() > 0 && start.height() > 0) {
+    const double k = std::max(std::abs(r.width()) / start.width(), std::abs(r.height()) / start.height());
+    if (left) r.left = start.right - start.width() * k; else r.right = start.left + start.width() * k;
+    if (top) r.top = start.bottom - start.height() * k; else r.bottom = start.top + start.height() * k;
+  }
+  return r.normalized();
+}
+
+void DocumentView::editPress(QMouseEvent* e) {
+  const QPointF pos = e->position();
+  e->accept();
+  const int corner = contentHandleUnder(pos);
+  if (corner >= 0) {
+    drag_ = Drag::ResizeContent;
+    dragPage_ = contentPage_;
+    resizeCorner_ = corner;
+    dragStart_ = dragNow_ = pointOnPage(contentPage_, pos);
+    dragMoved_ = false;
+    return;
+  }
+  int page;
+  QPointF pt;
+  if (editAddText_) {
+    if (pagePointAt(pos, page, pt, false)) {
+      editAddText_ = false;
+      emit editAddTextEnded();
+      startNewText(page, pt);
+    }
+    return;
+  }
+  int listPos;
+  if (contentUnder(pos, page, listPos)) {
+    const pdfz::ContentBlock& b = (*content_->get(page))[std::size_t(listPos)];
+    editPressWasSelected_ = page == contentPage_ && b.objects == contentSel_.objects;
+    contentPage_ = page;
+    contentSel_ = b;
+    drag_ = Drag::MoveContent;
+    dragPage_ = page;
+    dragStart_ = dragNow_ = pointOnPage(page, pos);
+    dragMoved_ = false;
+    viewport()->update();
+    emit contentSelectionChanged();
+    return;
+  }
+  clearContentSelection();
+  panning_ = true;  // empty space: move the page, as elsewhere
+  panLast_ = pos.toPoint();
+  viewport()->setCursor(Qt::ClosedHandCursor);
+}
+
+void DocumentView::startNewText(int page, QPointF pt) {
+  TextEditing t;
+  t.page = page;
+  t.isNew = true;
+  t.font = editNewFont_;
+  t.size = editNewSize_;
+  t.color = editNewColor_;
+  t.lineSpacing = t.size * 1.2;
+  // The click is where the text's top-left goes.
+  const double ascent = QFontMetricsF(qtFont(t.font, 1000)).ascent() / 1000 * t.size;
+  t.origin = {pt.x(), pt.y() + ascent};
+  t.block.rect = {pt.x(), pt.y(), pt.x() + 1, pt.y() + t.lineSpacing};
+  startContentEdit(t);
+}
+
+void DocumentView::startContentEdit(const TextEditing& e) {
+  commitContentEdit();
+  if (e.page < 0 || e.page >= int(pageRects_.size())) return;
+  editing_ = e;
+  contentPage_ = -1;
+  contentSel_ = {};
+  const quint64 gen = ++contentGeneration_;
+  contentEditor_ = new InlineTextEdit(viewport());
+  contentEditor_->setAutoWidth(e.width <= 0);
+  contentEditor_->setPlainText(e.original);
+  connect(contentEditor_, &InlineTextEdit::finished, this, [this, gen] {
+    if (gen == contentGeneration_) commitContentEdit();
+  }, Qt::QueuedConnection);
+  connect(contentEditor_, &InlineTextEdit::heightNeeded, this, [this, gen] {
+    if (gen == contentGeneration_) fitContentEditor();
+  });
+  layoutContentEditor(true);
+  contentEditor_->show();
+  contentEditor_->setFocus(Qt::OtherFocusReason);
+  contentEditor_->moveCursor(QTextCursor::End);
+  fitContentEditor();
+  viewport()->update();
+  emit contentEditStarted();
+}
+
+void DocumentView::commitContentEdit() {
+  if (!contentEditor_) return;
+  InlineTextEdit* ed = contentEditor_;
+  contentEditor_ = nullptr;
+  ++contentGeneration_;
+  const QString text = ed->toPlainText();
+  if (ed->hasFocus()) setFocus();
+  ed->hide();
+  ed->deleteLater();
+  viewport()->update();
+  const TextEditing e = editing_;
+  emit contentEditFinished(e, text);
+}
+
+void DocumentView::restyleContentEdit(const EditFont& font, double size, const QColor& color) {
+  if (!contentEditor_) return;
+  const double ratio = editing_.size > 0 ? size / editing_.size : 1;
+  editing_.font = font;
+  editing_.color = color;
+  editing_.lineSpacing *= ratio;
+  editing_.size = size;
+  layoutContentEditor(true);
+  fitContentEditor();
+}
+
+// The editor's text sits where the page's did: its first baseline on the block's.
+void DocumentView::layoutContentEditor(bool restyle) {
+  if (!contentEditor_) return;
+  const int page = editing_.page;
+  if (page < 0 || page >= int(pageRects_.size())) {
+    contentEditor_->hide();
+    return;
+  }
+  const double ppp = pagePixelsPerPoint(page);
+  const double pad = 2;  // pixels
+  const QFontMetricsF fm(qtFont(editing_.font, 1000));
+  const double ascent = fm.ascent() / 1000 * editing_.size;
+  const double lines = std::max(1, int(contentEditor_->document()->blockCount()));
+  const double top = editing_.origin.y - ascent - pad / ppp;
+  const double width = editing_.width > 0 ? editing_.width + 2 * pad / ppp + editing_.size * 0.3
+                                          : std::max(editing_.size * 2, contentEditor_->textWidth() / ppp + editing_.size * 0.8 + 2 * pad / ppp);
+  const double height = std::max(editing_.lineSpacing * lines, contentEditor_->contentHeight() / ppp);
+  const QRectF r = toViewport(page, pdfz::RectF{editing_.origin.x - pad / ppp, top, editing_.origin.x - pad / ppp + width,
+                                                top + height + 2 * pad / ppp});
+  contentEditor_->setGeometry(QRect(QPoint(int(std::floor(r.left())), int(std::floor(r.top()))),
+                                    QPoint(int(std::ceil(r.right())), int(std::ceil(r.bottom())))));
+  if (!restyle) return;
+  QFont font = qtFont(editing_.font, 10);
+  font.setPointSizeF(std::max(0.5, editing_.size * ppp * 72.0 / logicalDpiY()));
+  contentEditor_->setLook(font, editing_.color, 0, pad);
+  contentEditor_->setLineHeight(editing_.lineSpacing * ppp);
+}
+
+void DocumentView::fitContentEditor() {
+  layoutContentEditor(false);
+  viewport()->update();  // its frame
+}
+
+bool DocumentView::visibleCenter(int& page, pdfz::PointF& point) const {
+  if (pageRects_.empty()) return false;
+  page = currentPage_;
+  const QPointF c = pointOnPage(page, QPointF(viewport()->width() / 2.0, viewport()->height() / 2.0));
+  const pdfz::SizeF s = renderer_->document()->pageSize(page);
+  point = {std::clamp(c.x(), 0.0, s.width), std::clamp(c.y(), 0.0, s.height)};
+  return true;
+}
+
+void DocumentView::paintContent(QPainter& p) {
+  const QColor accent = palette().color(QPalette::Highlight);
+  const QRectF vis = visibleRect();
+  const int first = pageAt(vis.top()), last = pageAt(vis.bottom());
+  p.setBrush(Qt::NoBrush);
+  for (int i = first; i <= last && i >= 0; ++i) {
+    p.setPen(QPen(QColor(0x60, 0x60, 0x60, 150), 1, Qt::DotLine));
+    for (const pdfz::ContentBlock& b : *content_->get(i)) {
+      if (i == contentPage_ && b.objects == contentSel_.objects) continue;
+      p.drawRect(toViewport(i, b.rect).adjusted(-1.5, -1.5, 1.5, 1.5));
+    }
+  }
+  if (contentPage_ >= 0 && contentPage_ < int(pageRects_.size())) {
+    const bool dragging = (drag_ == Drag::MoveContent || drag_ == Drag::ResizeContent) && dragMoved_;
+    const QRectF r = toViewport(contentPage_, dragging ? contentDragRect() : contentSel_.rect).adjusted(-1.5, -1.5, 1.5, 1.5);
+    p.setPen(QPen(accent, 1.5));
+    p.drawRect(r);
+    if (contentSel_.kind == pdfz::ContentBlock::Kind::Image) {
+      p.setPen(QPen(accent, 1));
+      p.setBrush(Qt::white);
+      for (QPointF c : {r.topLeft(), r.topRight(), r.bottomLeft(), r.bottomRight()}) p.drawRect(QRectF(c.x() - 4, c.y() - 4, 8, 8));
+    }
+  }
+  if (contentEditor_) {
+    p.setPen(QPen(accent, 1, Qt::DashLine));
+    p.setBrush(Qt::NoBrush);
+    p.drawRect(QRectF(contentEditor_->geometry()).adjusted(-2, -2, 2, 2));
+  }
 }
 
 // ---------------------------------------------------------------------------------------------

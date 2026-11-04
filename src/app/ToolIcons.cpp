@@ -233,6 +233,67 @@ QIcon stampIcon(const QPalette& palette) {
   });
 }
 
+QIcon editPdfIcon(const QPalette& palette) {
+  return drawnIcon(palette, 24, [](QPainter& p, const QColor& ink, bool) {
+    // A page with lines of text, and a pencil across its corner.
+    const QColor paper = ink.lightness() > 128 ? QColor(0x30, 0x30, 0x30) : QColor(Qt::white);
+    p.setPen(QPen(ink, 1.3, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    p.setBrush(paper);
+    QPainterPath page;
+    page.moveTo(4.5, 2.5);
+    page.lineTo(14, 2.5);
+    page.lineTo(18.5, 7);
+    page.lineTo(18.5, 21.5);
+    page.lineTo(4.5, 21.5);
+    page.closeSubpath();
+    p.drawPath(page);
+    p.drawLine(QPointF(14, 2.5), QPointF(14, 7));
+    p.drawLine(QPointF(14, 7), QPointF(18.5, 7));
+    for (double y : {10.0, 13.0, 16.0}) p.drawLine(QPointF(7, y), QPointF(y < 15 ? 15.5 : 11.5, y));
+    QPainterPath pencil;
+    pencil.moveTo(12, 21);
+    pencil.lineTo(13, 17.5);
+    pencil.lineTo(21, 9.5);
+    pencil.lineTo(23.5, 12);
+    pencil.lineTo(15.5, 20);
+    pencil.closeSubpath();
+    p.setBrush(QColor(0xE6, 0xA1, 0x17));
+    p.setPen(QPen(ink, 1.1, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    p.drawPath(pencil);
+  });
+}
+
+QIcon addTextIcon(const QPalette& palette) {
+  return drawnIcon(palette, 24, [](QPainter& p, const QColor& ink, bool) {
+    p.setPen(QPen(ink, 1, Qt::DotLine));
+    p.setBrush(Qt::NoBrush);
+    p.drawRect(QRectF(2.5, 2.5, 19, 19));
+    p.setPen(QPen(ink, 2.2, Qt::SolidLine, Qt::FlatCap));
+    p.drawLine(QPointF(7, 7), QPointF(17, 7));
+    p.drawLine(QPointF(12, 7), QPointF(12, 18));
+  });
+}
+
+QIcon addImageIcon(const QPalette& palette) {
+  return drawnIcon(palette, 24, [](QPainter& p, const QColor& ink, bool) {
+    p.setPen(QPen(ink, 1.3, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    p.setBrush(Qt::NoBrush);
+    p.drawRoundedRect(QRectF(2.5, 4.5, 19, 15), 2, 2);
+    QPainterPath hills;
+    hills.moveTo(3.5, 18.5);
+    hills.lineTo(9, 11);
+    hills.lineTo(13, 15.5);
+    hills.lineTo(15.5, 13);
+    hills.lineTo(20.5, 18.5);
+    hills.closeSubpath();
+    p.setBrush(QColor(0x2E, 0x8B, 0x57));
+    p.drawPath(hills);
+    p.setPen(Qt::NoPen);
+    p.setBrush(QColor(0xE6, 0xA1, 0x17));
+    p.drawEllipse(QPointF(16.5, 8.5), 2, 2);
+  });
+}
+
 QIcon strokeColorIcon(const QColor& color, const QPalette& palette) {
   return drawnIcon(palette, 20, [&](QPainter& p, const QColor& ink, bool disabled) {
     const QColor c = color.isValid() && !disabled ? color : QColor(ink.red(), ink.green(), ink.blue(), 90);

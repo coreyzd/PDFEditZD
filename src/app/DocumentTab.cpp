@@ -22,7 +22,7 @@
 DocumentTab::DocumentTab(QWidget* parent) : QWidget(parent) {
   renderer_ = new PageRenderer(this);
   search_ = new TextSearch(this);
-  view_ = new DocumentView(renderer_, &textCache_, search_, &annots_, &fields_, this);
+  view_ = new DocumentView(renderer_, &textCache_, search_, &annots_, &fields_, &content_, this);
   auto* lay = new QVBoxLayout(this);
   lay->setContentsMargins(0, 0, 0, 0);
   lay->addWidget(view_);
@@ -52,6 +52,12 @@ DocumentTab::DocumentTab(QWidget* parent) : QWidget(parent) {
   connect(view_, &DocumentView::fieldChoiceRequested, this, &DocumentTab::setFieldChoice);
   connect(comments_, &CommentsPanel::deleteRequested, this, &DocumentTab::deleteAnnotation);
   connect(thumbs_, &ThumbnailPanel::pageActivated, view_, &DocumentView::goToPage);
+  connect(view_, &DocumentView::contentMoved, this, &DocumentTab::moveContent);
+  connect(view_, &DocumentView::contentResized, this, &DocumentTab::resizeContent);
+  connect(view_, &DocumentView::contentDeleteRequested, this, &DocumentTab::deleteContent);
+  connect(view_, &DocumentView::contentEditRequested, this, &DocumentTab::beginContentEdit);
+  // Direct: a click that ends the typing then finds the page's blocks as they are now.
+  connect(view_, &DocumentView::contentEditFinished, this, &DocumentTab::onContentEditFinished);
 }
 
 DocumentTab::~DocumentTab() {
@@ -75,6 +81,8 @@ void DocumentTab::setDocument(std::shared_ptr<pdfz::Document> doc, const QString
   textCache_.setDocument(doc_);
   annots_.setDocument(doc_);
   fields_.setDocument(doc_);
+  content_.setDocument(doc_);
+  view_->clearContentSelection();
   renderer_->setDocument(doc_);
   thumbs_->documentChanged();
   comments_->setDocument(doc_);
@@ -134,6 +142,17 @@ void DocumentTab::refresh(Scope scope, int page, int pageToShow) {
     emit contentChanged(false);
     return;
   }
+  if (scope == Scope::Content) {
+    content_.invalidate(page);
+    textCache_.invalidate(page);
+    search_->clear();
+    renderer_->invalidatePage(page);
+    thumbs_->pageChanged(page);
+    view_->contentChanged(page);
+    emit stateChanged();
+    emit contentChanged(true);
+    return;
+  }
   if (scope == Scope::Annotations) {
     annots_.invalidate(page);
     renderer_->invalidatePage(page);
@@ -146,9 +165,11 @@ void DocumentTab::refresh(Scope scope, int page, int pageToShow) {
   }
   view_->clearSelection();
   view_->clearAnnotationSelection();
+  view_->clearContentSelection();
   textCache_.setDocument(doc_);
   annots_.setDocument(doc_);
   fields_.setDocument(doc_);
+  content_.setDocument(doc_);
   renderer_->invalidate();
   thumbs_->documentChanged();
   comments_->setDocument(doc_);
@@ -279,6 +300,7 @@ void DocumentTab::editAnnotation(int page, int index) {
 void DocumentTab::finishTextEditing() {
   view_->commitTextEdit();
   view_->commitFieldEdit();
+  view_->commitContentEdit();
 }
 
 bool DocumentTab::fillField(int page, int index, const std::function<bool(pdfz::Document&)>& change) {
@@ -424,4 +446,181 @@ void DocumentTab::restyleAnnotation(int page, int index, const StyleChange& chan
     return now >= 0;
   });
   if (now >= 0) view_->selectAnnotation(page, now, false);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Edit PDF
+
+namespace {
+pdfz::PointF centerOf(const pdfz::RectF& r) { return {(r.left + r.right) / 2, (r.top + r.bottom) / 2}; }
+}  // namespace
+
+void DocumentTab::refreshContentRendering(int page) {
+  content_.invalidate(page);
+  renderer_->invalidatePage(page);
+  view_->contentChanged(page);
+}
+
+void DocumentTab::moveContent(int page, std::vector<int> objects, double dx, double dy) {
+  if (!doc_) return;
+  pdfz::PointF c{};
+  int pg;
+  pdfz::ContentBlock sel;
+  if (view_->selectedContent(pg, sel) && pg == page) c = centerOf(sel.rect);
+  if (applyEdit(tr("Move"), page, Scope::Content,
+                [&](pdfz::Document& d) { return d.moveContent(page, objects, dx, dy); }))
+    view_->selectContentAt(page, {c.x + dx, c.y + dy});
+}
+
+void DocumentTab::resizeContent(int page, std::vector<int> objects, pdfz::RectF from, pdfz::RectF to) {
+  if (!doc_) return;
+  if (applyEdit(tr("Resize Picture"), page, Scope::Content,
+                [&](pdfz::Document& d) { return d.resizeContent(page, objects, from, to); }))
+    view_->selectContentAt(page, centerOf(to));
+}
+
+void DocumentTab::deleteContent(int page, std::vector<int> objects) {
+  if (!doc_) return;
+  view_->clearContentSelection();
+  if (applyEdit(tr("Delete"), page, Scope::Content, [&](pdfz::Document& d) { return d.deleteContent(page, objects); }))
+    emit statusMessage(tr("Deleted (Ctrl+Z to undo)"), 3000);
+}
+
+void DocumentTab::addContentImage(int page, const pdfz::Document::PageImage& image, const pdfz::RectF& rect) {
+  if (!doc_) return;
+  if (applyEdit(tr("Add Image"), page, Scope::Content,
+                [&](pdfz::Document& d) { return d.addContentImage(page, image, rect); }))
+    view_->selectContentAt(page, centerOf(rect));
+  else
+    QMessageBox::warning(this, tr("Add Image"), tr("Couldn't add the picture to the page."));
+}
+
+TextEditing DocumentTab::editingFor(int page, const pdfz::ContentBlock& block) {
+  TextEditing t;
+  t.page = page;
+  t.block = block;
+  t.original = QString::fromStdString(block.text);
+  t.font = editFontFor(block);
+  t.size = block.fontSize > 0 ? block.fontSize : 12;
+  t.color = toQColor(block.color);
+  t.lineSpacing = block.lineSpacing > 0 ? block.lineSpacing : t.size * 1.2;
+  t.origin = block.origin;
+  // A paragraph keeps its width, and its lines wrap again; one line grows as it's typed in.
+  const bool paragraph = block.lineSpacing > 0 || t.original.contains('\n');
+  t.width = paragraph ? std::max(t.size, block.rect.right - block.origin.x) : 0;
+  return t;
+}
+
+bool DocumentTab::linesFor(const TextEditing& e, const QString& text, pdfz::TextLines& tl) {
+  tl = {};
+  for (const QString& line : wrapText(text, e.font, e.size, e.width)) tl.lines.push_back(line.toStdString());
+  tl.origin = e.origin;
+  tl.lineSpacing = e.lineSpacing;
+  tl.fontSize = e.size;
+  tl.color = fromQColor(e.color);
+  bool complete = true;
+  tl.font = pdfFont(e.font, text, &complete);
+  if (tl.font.standard.empty() && tl.font.file.empty()) {
+    QMessageBox::warning(this, tr("Edit Text"), tr("No font on this computer can show that text."));
+    return false;
+  }
+  if (!complete)
+    emit statusMessage(tr("Some of the characters aren't in any font that can be put in the PDF, so they won't show."), 6000);
+  return true;
+}
+
+void DocumentTab::restyleContent(int page, const pdfz::ContentBlock& block, const EditFont& font, double size,
+                                 const QColor& color) {
+  if (!doc_ || block.kind != pdfz::ContentBlock::Kind::Text || !block.editable) return;
+  TextEditing e = editingFor(page, block);
+  if (e.size > 0) {
+    e.lineSpacing *= size / e.size;
+    // The first line's top stays where it was.
+    e.origin.y += (size - e.size) * 0.8;
+  }
+  e.font = font;
+  e.size = size;
+  e.color = color;
+  pdfz::TextLines tl;
+  if (!linesFor(e, e.original, tl)) return;
+  const pdfz::PointF selectAt{e.origin.x + e.size * 0.3, e.origin.y - e.size * 0.3};
+  if (applyEdit(tr("Change Text Style"), page, Scope::Content,
+                [&](pdfz::Document& d) { return d.replaceText(page, block.objects, tl); }))
+    view_->selectContentAt(page, selectAt);
+}
+
+// Like a text box: the block is hidden while it's typed in, so the page shows only the
+// editor's text, and the snapshot from before is the undo step.
+void DocumentTab::beginContentEdit(int page, pdfz::ContentBlock block) {
+  finishTextEditing();
+  if (!doc_ || block.kind != pdfz::ContentBlock::Kind::Text || !block.editable) return;
+  QApplication::setOverrideCursor(Qt::WaitCursor);
+  auto before = pdfz::EditHistory::capture(*doc_, page);
+  QApplication::restoreOverrideCursor();
+  if (!before.bytes) {
+    QMessageBox::warning(this, tr("Edit Text"), tr("Couldn't prepare to undo this change, so it can't be made."));
+    return;
+  }
+  contentEditBefore_ = std::move(before);
+  doc_->setContentHidden(page, block.objects, true);
+  view_->clearContentSelection();
+  refreshContentRendering(page);
+  const TextEditing t = editingFor(page, block);
+  view_->startContentEdit(t);
+}
+
+void DocumentTab::onContentEditFinished(TextEditing e, const QString& typed) {
+  if (!doc_ || e.page < 0 || e.page >= doc_->pageCount()) return;
+  const int page = e.page;
+  // Trailing line breaks would only add empty lines.
+  QString text = typed;
+  while (text.endsWith('\n') || text.endsWith(' ')) text.chop(1);
+  const bool empty = text.trimmed().isEmpty();
+
+  if (e.isNew) {
+    if (empty) return;
+  } else {
+    pdfz::ContentBlock original = e.block;
+    const EditFont origFont = editFontFor(original);
+    const bool sameStyle = e.font == origFont && std::abs(e.size - original.fontSize) < 0.01 &&
+                           e.color == toQColor(original.color);
+    if (!contentEditBefore_.bytes) return;  // never started
+    if (text == e.original && sameStyle) {  // nothing changed: shown again
+      contentEditBefore_ = {};
+      doc_->setContentHidden(page, original.objects, false);
+      refreshContentRendering(page);
+      view_->selectContentAt(page, centerOf(original.rect));
+      return;
+    }
+  }
+
+  pdfz::TextLines tl;
+  if (!empty && !linesFor(e, text, tl)) {
+    if (!e.isNew) {
+      contentEditBefore_ = {};
+      doc_->setContentHidden(page, e.block.objects, false);
+      refreshContentRendering(page);
+    }
+    return;
+  }
+  const pdfz::PointF selectAt{e.origin.x + e.size * 0.3, e.origin.y - e.size * 0.3};
+
+  if (e.isNew) {
+    if (applyEdit(tr("Add Text"), page, Scope::Content, [&](pdfz::Document& d) { return d.replaceText(page, {}, tl); }))
+      view_->selectContentAt(page, selectAt);
+    return;
+  }
+
+  pdfz::EditHistory::Snapshot before = std::move(contentEditBefore_);
+  contentEditBefore_ = {};
+  const bool ok = empty ? doc_->deleteContent(page, e.block.objects) : doc_->replaceText(page, e.block.objects, tl);
+  if (!ok) {
+    doc_->setContentHidden(page, e.block.objects, false);
+    refreshContentRendering(page);
+    QMessageBox::warning(this, tr("Edit Text"), tr("Couldn't change the text."));
+    return;
+  }
+  history_.push(std::move(before), (empty ? tr("Delete Text") : tr("Edit Text")).toStdString());
+  refresh(Scope::Content, page, page);
+  if (!empty) view_->selectContentAt(page, selectAt);
 }

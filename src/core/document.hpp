@@ -11,6 +11,8 @@
 #include <string>
 #include <vector>
 
+#include "core/geometry.hpp"
+
 namespace pdfz {
 
 // Sizes and positions on a page are in PDF points (1/72 inch), as the page is displayed: a
@@ -69,6 +71,8 @@ struct PageFrame;
 struct Annotation;
 struct FormField;
 struct StampDrawing;
+struct ContentBlock;
+struct TextLines;
 
 // The complete bytes of a PDF file, shared without copying (an open document keeps its file's
 // bytes; undo snapshots are these too).
@@ -153,12 +157,35 @@ public:
   // Selects option `option` of a combo box or list box (for a multiple-selection list, only it).
   bool setFieldChoice(int page, int index, int option);
 
+  // The page's own content (content.hpp): its text in blocks, and its pictures. The objects of
+  // a block are page object indices, good until the page's content next changes.
+  std::vector<ContentBlock> contentBlocks(int page) const;
+  // Hides or shows objects while they're edited (not an edit, and not saved).
+  bool setContentHidden(int page, const std::vector<int>& objects, bool hidden);
+  bool moveContent(int page, const std::vector<int>& objects, double dx, double dy);  // display points
+  // Scales objects (pictures) so what was in `from` fills `to` (display frame).
+  bool resizeContent(int page, const std::vector<int>& objects, const RectF& from, const RectF& to);
+  bool deleteContent(int page, const std::vector<int>& objects);
+  // Takes out `remove` (if any) and adds `text` in their place: editing a block's text, or
+  // adding new text.
+  bool replaceText(int page, const std::vector<int>& remove, const TextLines& text);
+
   // Page editing. Indices are 0-based; each returns false (and changes nothing) on bad input.
   bool deletePage(int index);
   // Deletes several pages at once (distinct; not all of them).
   bool deletePages(std::vector<int> pages);
   // A blank page that becomes page `index` (index == pageCount() appends).
   bool insertBlankPage(int index, SizeF size);
+  // A page that becomes page `index`, `size` points big, with a picture fitted in the middle
+  // (inside `margin` points). The picture is JPEG data (kept as it is) or opaque BGRA pixels.
+  struct PageImage {
+    std::vector<std::uint8_t> jpeg;  // a whole JPEG file
+    std::vector<std::uint8_t> bgra;  // or pixels, top row first
+    int width = 0, height = 0;       // pixels, either way
+  };
+  bool insertImagePage(int index, SizeF size, const PageImage& image, double margin = 18);
+  // A picture added to a page's content, filling `rect` (display frame).
+  bool addContentImage(int page, const PageImage& image, const RectF& rect);
   // Copies `pages` of `source` (in that order) so they start at `index` here. `source` may not
   // be this document.
   bool importPages(const Document& source, const std::vector<int>& pages, int index);
@@ -215,6 +242,7 @@ private:
   void flushAppearances() const;
 
   void* doc_ = nullptr;  // FPDF_DOCUMENT
+  mutable std::vector<std::pair<std::string, void*>> fonts_;  // embedded fonts loaded, by key
   void* form_ = nullptr;  // FPDF_FORMHANDLE
   void* formInfo_ = nullptr;  // FPDF_FORMFILLINFO, which must outlive form_
   bool hasForm_ = false;

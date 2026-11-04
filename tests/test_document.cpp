@@ -293,3 +293,32 @@ TEST_CASE("extracting pages, and deleting several at once") {
   CHECK(d->pageSize(2).width == doctest::Approx(140));
   CHECK(!d->deletePages({0, 1, 2}));  // not every page
 }
+
+TEST_CASE("pages made from pictures") {
+  auto doc = pdfz::Document::create();
+  REQUIRE(doc->insertBlankPage(0, {612, 792}));
+  // A 40 x 20 picture, red: fitted into a Letter page inside 18 pt margins, it is 576 x 288.
+  pdfz::Document::PageImage img;
+  img.width = 40;
+  img.height = 20;
+  img.bgra.resize(40 * 20 * 4);
+  for (std::size_t i = 0; i < img.bgra.size(); i += 4) {
+    img.bgra[i + 2] = 255;
+    img.bgra[i + 3] = 255;
+  }
+  REQUIRE(doc->insertImagePage(1, {612, 792}, img));
+  REQUIRE(doc->pageCount() == 2);
+  CHECK(doc->pageSize(1).width == doctest::Approx(612));
+  auto [saved, err] = pdfz::Document::openMemory(doc->saveToMemory());
+  REQUIRE(saved);
+  const auto bmp = saved->render(1, 0.5, {0, 0, 306, 396});
+  CHECK((bmp.pixel(153, 198) & 0xFFFFFF) == 0xFF0000u);  // the middle: red
+  CHECK((bmp.pixel(153, 20) & 0xFFFFFF) == 0xFFFFFFu);   // above it: white
+  CHECK((bmp.pixel(4, 198) & 0xFFFFFF) == 0xFFFFFFu);    // the margin
+
+  // Bad input changes nothing.
+  CHECK(!doc->insertImagePage(5, {612, 792}, img));
+  pdfz::Document::PageImage empty;
+  CHECK(!doc->insertImagePage(0, {612, 792}, empty));
+  CHECK(doc->pageCount() == 2);
+}

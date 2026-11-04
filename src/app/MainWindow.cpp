@@ -4,6 +4,7 @@
 #include "CommentsPanel.hpp"
 #include "DocumentTab.hpp"
 #include "FindBar.hpp"
+#include "OfficeImport.hpp"
 #include "Printing.hpp"
 #include "SignatureDialog.hpp"
 #include "TextSearch.hpp"
@@ -210,6 +211,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
   if (!restoreGeometry(s.value("window/geometry").toByteArray())) resize(1200, 860);
   restoreState(s.value("window/state").toByteArray());
   if (!s.contains("window/state")) commentsDock_->hide();  // shown when wanted (View > Comments)
+  editBar_->hide();  // until Edit PDF is picked
 
   onCurrentTabChanged();
 }
@@ -281,6 +283,17 @@ void MainWindow::connectTab(DocumentTab* t) {
   });
   connect(v, &DocumentView::textEditFinished, this, [this, t] {
     if (t == tab()) updateStyleControls();
+  });
+  // Edit PDF.
+  for (auto sig : {&DocumentView::contentSelectionChanged, &DocumentView::contentEditStarted})
+    connect(v, sig, this, [this, t] {
+      if (t == tab()) updateEditControls();
+    });
+  connect(v, &DocumentView::contentEditFinished, this, [this, t] {
+    if (t == tab()) QTimer::singleShot(0, this, &MainWindow::updateEditControls);
+  });
+  connect(v, &DocumentView::editAddTextEnded, this, [this, t] {
+    if (t == tab()) addTextAct_->setChecked(false);
   });
   connect(v, &DocumentView::signatureFieldClicked, this,
           [this, t](int page, const pdfz::RectF& rect) { signField(t, page, rect); });
@@ -454,6 +467,34 @@ void MainWindow::createActions() {
   stampAct_->setToolTip(tr("Stamps: Approved, Draft, Confidential... and your own pictures"));
   toolGroup_->addAction(stampAct_);
 
+  // Edit PDF: the page's own text and pictures.
+  editAct_ = new QAction(editPdfIcon(palette()), tr("&Edit PDF"), this);
+  editAct_->setCheckable(true);
+  editAct_->setToolTip(tr("Edit PDF: change, move or delete the page's text and pictures, and add new ones"));
+  toolGroup_->addAction(editAct_);
+  addTextAct_ = new QAction(addTextIcon(palette()), tr("Add &Text"), this);
+  addTextAct_->setCheckable(true);
+  addTextAct_->setToolTip(tr("Add text: click where it goes on the page, and type"));
+  connect(addTextAct_, &QAction::triggered, this, [this](bool on) {
+    if (on && !editAct_->isChecked()) editAct_->trigger();
+    if (DocumentTab* t = tab()) {
+      t->finishTextEditing();
+      t->view()->setEditAddText(on);
+    }
+  });
+  addImageAct_ = new QAction(addImageIcon(palette()), tr("Add &Image…"), this);
+  addImageAct_->setToolTip(tr("Add a picture to the page"));
+  connect(addImageAct_, &QAction::triggered, this, &MainWindow::addImage);
+  {
+    QSettings st;
+    newTextFont_.family = st.value("edit/font", QStringLiteral("Helvetica")).toString();
+    newTextFont_.bold = st.value("edit/bold", false).toBool();
+    newTextFont_.italic = st.value("edit/italic", false).toBool();
+    newTextSize_ = std::clamp(st.value("edit/size", 12.0).toDouble(), 1.0, 500.0);
+    newTextColor_ = QColor(st.value("edit/color", QStringLiteral("#000000")).toString());
+    if (!newTextColor_.isValid()) newTextColor_ = Qt::black;
+  }
+
   saveFlatAct_ = new QAction(tr("Save as &Flattened…"), this);
   saveFlatAct_->setToolTip(tr("Save a copy in which comments, signatures and form fields can't be changed"));
   connect(saveFlatAct_, &QAction::triggered, this, &MainWindow::saveFlattened);
@@ -582,6 +623,10 @@ void MainWindow::createMenus() {
   edit->addAction(findAct_);
   edit->addAction(findNextAct_);
   edit->addAction(findPrevAct_);
+  edit->addSeparator();
+  edit->addAction(editAct_);
+  edit->addAction(addTextAct_);
+  edit->addAction(addImageAct_);
 
   QMenu* comment = menuBar()->addMenu(tr("&Comment"));
   for (int i = 0; i < kCommentToolCount; ++i) comment->addAction(markupActs_[std::size_t(i)]);
@@ -660,6 +705,10 @@ void MainWindow::createToolBars() {
   tb->addSeparator();
   tb->addAction(selectToolAct_);
   tb->addAction(handToolAct_);
+  auto* editButton = new QToolButton(this);
+  editButton->setDefaultAction(editAct_);
+  editButton->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+  tb->addWidget(editButton);
   tb->addSeparator();
   tb->addAction(prevPageAct_);
   tb->addAction(nextPageAct_);
@@ -790,6 +839,57 @@ void MainWindow::createToolBars() {
     textControls_.push_back(a);
   }
 
+  // Edit PDF's tools, on their own row while it's in use.
+  addToolBarBreak();
+  editBar_ = addToolBar(tr("Edit PDF"));
+  editBar_->setObjectName("editPdfToolBar");
+  editBar_->setMovable(false);
+  editBar_->toggleViewAction()->setVisible(false);  // shown with the tool, not from the menu
+  editBar_->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+  editBar_->addAction(addTextAct_);
+  editBar_->addAction(addImageAct_);
+  for (QAction* a : {addTextAct_, addImageAct_})
+    if (auto* w = editBar_->widgetForAction(a)) w->setFocusPolicy(Qt::NoFocus);
+  editBar_->addSeparator();
+  editFontCombo_ = styleCombo(tr("Font"));
+  for (const QString& f : editFontFamilies()) {
+    if (editFontCombo_->count() == 3) editFontCombo_->insertSeparator(3);  // after the standard fonts
+    editFontCombo_->addItem(f, f);
+  }
+  editFontCombo_->setMaxVisibleItems(20);
+  editFontCombo_->setMinimumContentsLength(14);
+  connect(editFontCombo_, &QComboBox::activated, this,
+          [this](int i) { changeEditStyle(EditStyleChange{.family = editFontCombo_->itemData(i).toString()}); });
+  editBar_->addWidget(editFontCombo_);
+  editSizeCombo_ = styleCombo(tr("Font size"));
+  for (int pt : {6, 7, 8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 32, 36, 48, 60, 72}) editSizeCombo_->addItem(tr("%1 pt").arg(pt), double(pt));
+  connect(editSizeCombo_, &QComboBox::activated, this,
+          [this](int i) { changeEditStyle(EditStyleChange{.size = editSizeCombo_->itemData(i).toDouble()}); });
+  editBar_->addWidget(editSizeCombo_);
+  editColorButton_ = styleButton(tr("Text color"));
+  editColorButton_->setMenu(colorMenu(editColorButton_, {}, [this](const QColor& c) { changeEditStyle(EditStyleChange{.color = c}); }));
+  editBar_->addWidget(editColorButton_);
+  editBoldAct_ = editBar_->addAction(tr("B"));
+  editBoldAct_->setToolTip(tr("Bold"));
+  editBoldAct_->setCheckable(true);
+  editItalicAct_ = editBar_->addAction(tr("I"));
+  editItalicAct_->setToolTip(tr("Italic"));
+  editItalicAct_->setCheckable(true);
+  for (auto [a, bold] : {std::pair{editBoldAct_, true}, std::pair{editItalicAct_, false}}) {
+    QFont f = font();
+    f.setBold(bold);
+    f.setItalic(!bold);
+    a->setFont(f);
+    if (auto* w = editBar_->widgetForAction(a)) {
+      w->setFocusPolicy(Qt::NoFocus);
+      static_cast<QToolButton*>(w)->setToolButtonStyle(Qt::ToolButtonTextOnly);
+    }
+    connect(a, &QAction::triggered, this, [this, bold](bool on) {
+      changeEditStyle(bold ? EditStyleChange{.bold = on} : EditStyleChange{.italic = on});
+    });
+  }
+  editBar_->hide();
+
   // In the View menu, under the panels.
   QAction* toggle = markupBar_->toggleViewAction();
   toggle->setText(tr("Comment &Tools"));
@@ -855,6 +955,7 @@ void MainWindow::updateUi() {
   for (QAction* a : markupActs_) a->setEnabled(has);
   signAct_->setEnabled(has);
   stampAct_->setEnabled(has);
+  for (QAction* a : {editAct_, addTextAct_, addImageAct_}) a->setEnabled(has);
   extractAct_->setEnabled(has);
   splitAct_->setEnabled(has && t->document()->pageCount() > 1);
   signMenu_->setEnabled(has);
@@ -1137,24 +1238,75 @@ void MainWindow::insertBlankPage() {
                [&](pdfz::Document& d) { return d.insertBlankPage(at, size); });
 }
 
+// PDFs, Word documents (converted by Word) and pictures (a page each, the size of the page
+// they go after), several at once, in the order chosen, after the current page.
 void MainWindow::insertPagesFromFile() {
   DocumentTab* t = tab();
   if (!t || !t->hasDocument()) return;
-  const QString path = QFileDialog::getOpenFileName(this, tr("Insert Pages from File"), lastDir(), tr(kPdfFilter));
-  if (path.isEmpty()) return;
-  rememberDir(path);
-  auto other = loadWithPrompt(path);
-  if (!other) return;
-  std::vector<int> all(std::size_t(other->pageCount()));
-  for (int i = 0; i < other->pageCount(); ++i) all[std::size_t(i)] = i;
-  const int at = t->view()->currentPage() + 1;
-  if (all.empty() || !t->applyEdit(tr("Insert Pages"), at, DocumentTab::Scope::Pages,
-                                   [&](pdfz::Document& d) { return d.importPages(*other, all, at); })) {
-    QMessageBox::warning(this, tr("Insert Pages"), tr("Couldn't insert the pages of %1.").arg(QFileInfo(path).fileName()));
-    return;
+  t->finishTextEditing();
+  const QString all = (QStringList{"*.pdf"} + wordPatterns() + imagePatterns()).join(' ');
+  const QString filter = tr("PDFs, Word documents and pictures (%1);;PDF documents (*.pdf);;Word documents (%2);;"
+                            "Pictures (%3);;All files (*)")
+                             .arg(all, wordPatterns().join(' '), imagePatterns().join(' '));
+  const QStringList paths = QFileDialog::getOpenFileNames(this, tr("Insert Pages from File"), lastDir(), filter);
+  if (paths.isEmpty()) return;
+  rememberDir(paths.front());
+
+  const int start = t->view()->currentPage() + 1;
+  int at = start;
+  int inserted = 0;
+  QStringList failed;
+  for (const QString& path : paths) {
+    const QString name = QFileInfo(path).fileName();
+    if (isImageFile(path)) {
+      pdfz::Document::PageImage img;
+      QString error;
+      if (!loadPageImage(path, img, &error)) {
+        failed << error;
+        continue;
+      }
+      // The size of the page it goes after (or before, at the start).
+      const pdfz::SizeF size = t->document()->pageSize(std::max(0, at - 1));
+      if (t->applyEdit(tr("Insert Picture"), at, DocumentTab::Scope::Pages,
+                       [&](pdfz::Document& d) { return d.insertImagePage(at, size, img); })) {
+        ++at;
+        ++inserted;
+      } else {
+        failed << tr("Couldn't make a page of %1.").arg(name);
+      }
+      continue;
+    }
+    QString pdfPath = path;
+    QString converted;
+    if (isWordFile(path)) {
+      QString error;
+      converted = convertToPdf(this, path, &error);
+      if (converted.isEmpty()) {
+        if (!error.isEmpty()) failed << error;
+        continue;
+      }
+      pdfPath = converted;
+    }
+    auto other = loadWithPrompt(pdfPath);
+    if (!converted.isEmpty()) {
+      QFile::remove(converted);
+      QDir().rmdir(QFileInfo(converted).absolutePath());
+    }
+    if (!other) continue;
+    std::vector<int> pages(std::size_t(other->pageCount()));
+    for (int i = 0; i < other->pageCount(); ++i) pages[std::size_t(i)] = i;
+    if (!pages.empty() && t->applyEdit(tr("Insert Pages"), at, DocumentTab::Scope::Pages,
+                                       [&](pdfz::Document& d) { return d.importPages(*other, pages, at); })) {
+      at += int(pages.size());
+      inserted += int(pages.size());
+    } else {
+      failed << tr("Couldn't insert the pages of %1.").arg(name);
+    }
   }
-  statusBar()->showMessage((all.size() == 1 ? tr("Inserted 1 page from %1").arg(QFileInfo(path).fileName())
-                                             : tr("Inserted %1 pages from %2").arg(all.size()).arg(QFileInfo(path).fileName())), 4000);
+  if (inserted > 0) t->view()->goToPage(start);
+  if (!failed.isEmpty()) QMessageBox::warning(this, tr("Insert Pages"), failed.join("\n\n"));
+  if (inserted > 0)
+    statusBar()->showMessage(inserted == 1 ? tr("Inserted 1 page") : tr("Inserted %1 pages").arg(inserted), 4000);
 }
 
 void MainWindow::rotatePages(int degrees) {
@@ -1274,8 +1426,18 @@ void MainWindow::updateFindStatus() {
 
 void MainWindow::applyTool() {
   DocumentTab* t = tab();
+  const bool editing = t && t->hasDocument() && editAct_->isChecked();
+  editBar_->setVisible(editing);
+  if (!editAct_->isChecked()) addTextAct_->setChecked(false);
   if (!t) return;
   DocumentView* v = t->view();
+  if (editAct_->isChecked()) {
+    v->setTool(DocumentView::Tool::Edit);
+    v->setNewTextStyle(newTextFont_, newTextSize_, newTextColor_);
+    v->setEditAddText(addTextAct_->isChecked());
+    updateEditControls();
+    return;
+  }
   if (handToolAct_->isChecked()) {
     v->setTool(DocumentView::Tool::Hand);
     return;
@@ -1364,6 +1526,133 @@ void MainWindow::updateStyleControls() {
     textColorButton_->setIcon(textColorIcon(st->textColor, palette()));
     alignActs_[std::size_t(std::clamp(st->align, 0, 2))]->setChecked(true);
   }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Edit PDF
+
+// The style shown: of the text being typed in, else of the selected text, else of new text.
+void MainWindow::updateEditControls() {
+  DocumentTab* t = tab();
+  EditFont font = newTextFont_;
+  double size = newTextSize_;
+  QColor color = newTextColor_;
+  bool textControls = true;
+  if (t && t->hasDocument()) {
+    DocumentView* v = t->view();
+    int page;
+    pdfz::ContentBlock b;
+    if (const TextEditing* e = v->contentEditing()) {
+      font = e->font;
+      size = e->size;
+      color = e->color;
+    } else if (v->selectedContent(page, b)) {
+      if (b.kind == pdfz::ContentBlock::Kind::Text && b.editable) {
+        font = editFontFor(b);
+        size = b.fontSize;
+        color = toQColor(b.color);
+      } else {
+        textControls = false;  // a picture, or text that's turned
+      }
+    }
+  }
+  int fi = editFontCombo_->findData(font.family);
+  if (fi < 0) {
+    editFontCombo_->addItem(font.family, font.family);
+    fi = editFontCombo_->count() - 1;
+  }
+  editFontCombo_->setCurrentIndex(fi);
+  const double rounded = std::round(size * 10) / 10;
+  int si = -1;
+  for (int i = 0; i < editSizeCombo_->count(); ++i)
+    if (std::abs(editSizeCombo_->itemData(i).toDouble() - rounded) < 0.05) si = i;
+  if (si < 0) {
+    int at = 0;
+    while (at < editSizeCombo_->count() && editSizeCombo_->itemData(at).toDouble() < rounded) ++at;
+    editSizeCombo_->insertItem(at, tr("%1 pt").arg(rounded), rounded);
+    si = at;
+  }
+  editSizeCombo_->setCurrentIndex(si);
+  editColorButton_->setIcon(textColorIcon(color, palette()));
+  editBoldAct_->setChecked(font.bold);
+  editItalicAct_->setChecked(font.italic);
+  for (QWidget* w : std::initializer_list<QWidget*>{editFontCombo_, editSizeCombo_, editColorButton_}) w->setEnabled(textControls);
+  editBoldAct_->setEnabled(textControls);
+  editItalicAct_->setEnabled(textControls);
+}
+
+void MainWindow::changeEditStyle(const EditStyleChange& c) {
+  DocumentTab* t = tab();
+  if (!t || !t->hasDocument()) return;
+  DocumentView* v = t->view();
+  auto apply = [&c](EditFont& f, double& size, QColor& color) {
+    if (c.family) f.family = *c.family;
+    if (c.bold) f.bold = *c.bold;
+    if (c.italic) f.italic = *c.italic;
+    if (c.size) size = *c.size;
+    if (c.color && c.color->isValid()) color = *c.color;
+  };
+  int page;
+  pdfz::ContentBlock b;
+  if (const TextEditing* e = v->contentEditing()) {
+    EditFont f = e->font;
+    double size = e->size;
+    QColor color = e->color;
+    apply(f, size, color);
+    if (e->isNew) {  // what Add Text types in next looks like this too
+      newTextFont_ = f;
+      newTextSize_ = size;
+      newTextColor_ = color;
+    }
+    v->restyleContentEdit(f, size, color);
+  } else if (v->selectedContent(page, b) && b.kind == pdfz::ContentBlock::Kind::Text && b.editable) {
+    EditFont f = editFontFor(b);
+    double size = b.fontSize;
+    QColor color = toQColor(b.color);
+    apply(f, size, color);
+    t->restyleContent(page, b, f, size, color);
+  } else {
+    apply(newTextFont_, newTextSize_, newTextColor_);
+  }
+  QSettings st;
+  st.setValue("edit/font", newTextFont_.family);
+  st.setValue("edit/bold", newTextFont_.bold);
+  st.setValue("edit/italic", newTextFont_.italic);
+  st.setValue("edit/size", newTextSize_);
+  st.setValue("edit/color", newTextColor_.name());
+  v->setNewTextStyle(newTextFont_, newTextSize_, newTextColor_);
+  updateEditControls();
+}
+
+// The picture goes in the middle of what's showing of the page, at most three inches across,
+// and is then selected, to move or resize.
+void MainWindow::addImage() {
+  DocumentTab* t = tab();
+  if (!t || !t->hasDocument()) return;
+  if (!editAct_->isChecked()) editAct_->trigger();
+  t->finishTextEditing();
+  QSettings st;
+  const QString dir = st.value("edit/imageDir", QStandardPaths::writableLocation(QStandardPaths::PicturesLocation)).toString();
+  const QString path = QFileDialog::getOpenFileName(this, tr("Add Image"), dir,
+                                                    tr("Pictures (%1)").arg(imagePatterns().join(' ')));
+  if (path.isEmpty()) return;
+  st.setValue("edit/imageDir", QFileInfo(path).absolutePath());
+  pdfz::Document::PageImage img;
+  QString error;
+  if (!loadPageImage(path, img, &error)) {
+    QMessageBox::warning(this, tr("Add Image"), error.isEmpty() ? tr("Couldn't read that picture.") : error);
+    return;
+  }
+  int page;
+  pdfz::PointF c;
+  if (!t->view()->visibleCenter(page, c)) return;
+  const pdfz::SizeF ps = t->document()->pageSize(page);
+  const double maxSide = std::min({216.0, ps.width * 0.9, ps.height * 0.9});
+  const double k = maxSide / std::max(img.width, img.height);
+  const double w = img.width * k, h = img.height * k;
+  const double x = std::clamp(c.x - w / 2, 0.0, std::max(0.0, ps.width - w));
+  const double y = std::clamp(c.y - h / 2, 0.0, std::max(0.0, ps.height - h));
+  t->addContentImage(page, img, pdfz::RectF{x, y, x + w, y + h});
 }
 
 QMenu* MainWindow::colorMenu(QWidget* parent, const QString& noneText, std::function<void(const QColor&)> pick) {
