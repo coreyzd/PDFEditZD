@@ -34,25 +34,35 @@ bool matches(const QString& path, const QStringList& patterns) {
 
 // Word, driven through its COM interface from PowerShell: opened read-only and invisible, saved
 // as PDF, closed. A password-protected document fails instead of asking (a wrong password is
-// given), so nothing waits on a hidden prompt.
+// given), so nothing waits on a hidden prompt. Word's Open, Close and Quit take their arguments
+// by reference, which PowerShell only passes as [ref]. Closing and quitting can't fail the
+// conversion or hide its error.
 const char* const kWordScript = R"PS(
 param([string]$In, [string]$Out)
 $ErrorActionPreference = 'Stop'
 $word = $null
+$doc = $null
+$ok = $false
 try {
   $word = New-Object -ComObject Word.Application
   $word.Visible = $false
   $word.DisplayAlerts = 0
-  $doc = $word.Documents.Open($In, $false, $true, $false, 'pdfz-no-password')
+  $file = $In
+  $confirm = $false
+  $readOnly = $true
+  $recent = $false
+  $password = 'pdfz-no-password'
+  $doc = $word.Documents.Open([ref]$file, [ref]$confirm, [ref]$readOnly, [ref]$recent, [ref]$password)
   $doc.ExportAsFixedFormat($Out, 17)
-  $doc.Close(0)
-  exit 0
+  $ok = $true
 } catch {
   [Console]::Error.WriteLine($_.Exception.Message)
-  exit 1
 } finally {
-  if ($word) { $word.Quit(0); [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($word) }
+  try { if ($doc) { $dontSave = 0; $doc.Close([ref]$dontSave) } } catch {}
+  try { if ($word) { $word.Quit() } } catch {}
+  try { if ($word) { [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($word) } } catch {}
 }
+if ($ok) { exit 0 } else { exit 1 }
 )PS";
 
 QString findLibreOffice() {
