@@ -73,6 +73,8 @@ struct FormField;
 struct StampDrawing;
 struct ContentBlock;
 struct TextLines;
+struct PlacedText;
+struct Affine;
 
 // The complete bytes of a PDF file, shared without copying (an open document keeps its file's
 // bytes; undo snapshots are these too).
@@ -165,10 +167,13 @@ public:
   bool moveContent(int page, const std::vector<int>& objects, double dx, double dy);  // display points
   // Scales objects (pictures) so what was in `from` fills `to` (display frame).
   bool resizeContent(int page, const std::vector<int>& objects, const RectF& from, const RectF& to);
+  // Moves, scales, turns or flips objects by `m`, a map of the display frame.
+  bool transformContent(int page, const std::vector<int>& objects, const Affine& m);
   bool deleteContent(int page, const std::vector<int>& objects);
   // Takes out `remove` (if any) and adds `text` in their place: editing a block's text, or
   // adding new text.
   bool replaceText(int page, const std::vector<int>& remove, const TextLines& text);
+  bool replaceText(int page, const std::vector<int>& remove, const PlacedText& text);
 
   // Page editing. Indices are 0-based; each returns false (and changes nothing) on bad input.
   bool deletePage(int index);
@@ -233,6 +238,10 @@ private:
   // parsed. Owned by the cache; valid until the next call that changes the page list.
   void* cachedPage(int index) const;
   void dropCachedPages() const;
+  void dropCachedPage(int index) const;
+  // The page, ready for its content to be changed (content.cpp): its objects all in one
+  // content stream. The handle may be another than cachedPage() gave before.
+  void* pageForContentEdit(int index);
   // PDFium's form-fill environment, which form fields need to be drawn and filled in. Made
   // again after the page list changes, so it knows the fields of imported pages.
   void initForms();

@@ -113,14 +113,9 @@ private:
   void fillStampMenu(QMenu* menu);
   void placeStamp(const MadeStamp& stamp, const QString& subject);
   // Edit PDF.
-  struct EditStyleChange {
-    std::optional<QString> family = {};
-    std::optional<double> size = {};
-    std::optional<QColor> color = {};
-    std::optional<bool> bold = {};
-    std::optional<bool> italic = {};
-  };
-  void changeEditStyle(const EditStyleChange& change);  // the text typed in, selected, or new
+  // The text typed in (its selected characters, or all of it), else the selected text, else
+  // new text.
+  void changeEditStyle(const TextStyleChange& change);
   void updateEditControls();
   void addImage();
 
@@ -174,14 +169,16 @@ private:
   QAction* addTextAct_;
   QAction* addImageAct_;
   QToolBar* editBar_;
+  bool editBarShown_ = false;   // in place of the comment tools, which were shown or not:
+  bool commentBarWasShown_ = true;
   QComboBox* editFontCombo_;
   QComboBox* editSizeCombo_;
   QToolButton* editColorButton_;
   QAction* editBoldAct_;
   QAction* editItalicAct_;
-  EditFont newTextFont_;   // what Add Text types in
-  double newTextSize_ = 12;
-  QColor newTextColor_ = Qt::black;
+  std::array<QAction*, 4> editAlignActs_{};
+  std::vector<QAction*> objectActs_;  // turn and flip: for a selection
+  RichRun newTextStyle_;   // what Add Text types in
   QMenu* signMenu_;
   QAction* selectToolAct_;
   QAction* handToolAct_;

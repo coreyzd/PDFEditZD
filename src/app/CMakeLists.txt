@@ -22,6 +22,7 @@ add_executable(pdfeditzd
   Stamps.cpp
   Fonts.cpp
   ContentEdit.cpp
+  RichText.cpp
   SignatureDialog.cpp
   CommentDialog.cpp
   CommentsPanel.cpp

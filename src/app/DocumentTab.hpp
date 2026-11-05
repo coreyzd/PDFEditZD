@@ -84,7 +84,7 @@ public:
   // selected.
   void addContentImage(int page, const pdfz::Document::PageImage& image, const pdfz::RectF& rect);
   // A block of the page's text written again in another font, size or color.
-  void restyleContent(int page, const pdfz::ContentBlock& block, const EditFont& font, double size, const QColor& color);
+  void restyleContent(int page, const pdfz::ContentBlock& block, const TextStyleChange& change);
 
 signals:
   void stateChanged();                // name, modified, undo/redo, page count
@@ -100,15 +100,14 @@ private:
   void onTextEditFinished(int page, int index, pdfz::Annotation a, bool changed);
   void refreshRendering(int page);  // the page's look changed, but not as an edit
   // Edit PDF.
-  void moveContent(int page, std::vector<int> objects, double dx, double dy);
-  void resizeContent(int page, std::vector<int> objects, pdfz::RectF from, pdfz::RectF to);
+  void transformContent(int page, std::vector<int> objects, pdfz::Affine m, QString label);
   void deleteContent(int page, std::vector<int> objects);
   void beginContentEdit(int page, pdfz::ContentBlock block);
-  void onContentEditFinished(TextEditing editing, const QString& text);
+  void onContentEditFinished(TextEditing editing, RichText text);
   void refreshContentRendering(int page);  // hidden or shown again, not as an edit
   static TextEditing editingFor(int page, const pdfz::ContentBlock& block);
   // The text laid out for the page; false (and a message) if no font can show it.
-  bool linesFor(const TextEditing& e, const QString& text, pdfz::TextLines& out);
+  bool layoutFor(const TextEditing& e, const RichText& text, pdfz::PlacedText& out);
 
   std::shared_ptr<pdfz::Document> doc_;
   QString path_;

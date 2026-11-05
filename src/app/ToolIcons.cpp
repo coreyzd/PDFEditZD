@@ -335,10 +335,48 @@ QIcon alignIcon(int align, const QPalette& palette) {
     p.setPen(QPen(ink, 1.6, Qt::SolidLine, Qt::RoundCap));
     const double widths[] = {14, 9, 14, 7};
     for (int i = 0; i < 4; ++i) {
-      const double w = widths[i], y = 4.5 + i * 3.7;
-      const double x = align == 0 ? 3 : align == 1 ? 10 - w / 2 : 17 - w;
+      const double w = align == 3 && i < 3 ? 14 : widths[i], y = 4.5 + i * 3.7;  // 3: justified
+      const double x = align == 0 || align == 3 ? 3 : align == 1 ? 10 - w / 2 : 17 - w;
       p.drawLine(QPointF(x, y), QPointF(x + w, y));
     }
+  });
+}
+
+QIcon rotateIcon(bool clockwise, const QPalette& palette) {
+  return drawnIcon(palette, 20, [&](QPainter& p, const QColor& ink, bool) {
+    // A three-quarter arc with an arrowhead, mirrored for the other way.
+    if (!clockwise) {
+      p.translate(20, 0);
+      p.scale(-1, 1);
+    }
+    p.setPen(QPen(ink, 1.6, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    p.setBrush(Qt::NoBrush);
+    p.drawArc(QRectF(4, 4, 12, 12), 90 * 16, -270 * 16);
+    QPainterPath head;
+    head.moveTo(10, 1.5);
+    head.lineTo(13.5, 4);
+    head.lineTo(10, 6.5);
+    p.drawPath(head);
+  });
+}
+
+QIcon flipIcon(bool horizontal, const QPalette& palette) {
+  return drawnIcon(palette, 20, [&](QPainter& p, const QColor& ink, bool) {
+    if (!horizontal) {  // the same, turned a quarter
+      p.translate(20, 0);
+      p.rotate(90);
+    }
+    p.setPen(QPen(ink, 1.3, Qt::DashLine));
+    p.drawLine(QPointF(10, 2), QPointF(10, 18));
+    p.setPen(QPen(ink, 1.3, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    QPolygonF left;
+    left << QPointF(7.5, 5) << QPointF(7.5, 15) << QPointF(2, 15);
+    p.setBrush(ink);
+    p.drawPolygon(left);
+    QPolygonF right;
+    right << QPointF(12.5, 5) << QPointF(12.5, 15) << QPointF(18, 15);
+    p.setBrush(Qt::NoBrush);
+    p.drawPolygon(right);
   });
 }
 

@@ -10,7 +10,6 @@
 #include <QProcess>
 #include <QRawFont>
 #include <QSettings>
-#include <QTextLayout>
 
 namespace {
 
@@ -75,12 +74,16 @@ QString fontFile(const QString& family, bool bold, bool italic) {
 
 }  // namespace
 
-EditFont editFontFor(const pdfz::ContentBlock& b) {
+EditFont editFontFor(const pdfz::ContentBlock& b) { return editFontFor(b.family, b.fontName, b.bold, b.italic); }
+
+EditFont editFontFor(const pdfz::TextRun& r) { return editFontFor(r.family, r.fontName, r.bold, r.italic); }
+
+EditFont editFontFor(const std::string& pdfFamily, const std::string& fontName, bool bold, bool italic) {
   EditFont f;
-  f.bold = b.bold;
-  f.italic = b.italic;
-  const QString family = QString::fromStdString(b.family).trimmed();
-  switch (standardOf(family.isEmpty() ? QString::fromStdString(b.fontName) : family)) {
+  f.bold = bold;
+  f.italic = italic;
+  const QString family = QString::fromStdString(pdfFamily).trimmed();
+  switch (standardOf(family.isEmpty() ? QString::fromStdString(fontName) : family)) {
     case Standard::Helvetica: f.family = family.contains("Arial", Qt::CaseInsensitive) ? "Arial" : "Helvetica"; break;
     case Standard::Times: f.family = family.contains("New", Qt::CaseInsensitive) ? "Times New Roman" : "Times"; break;
     case Standard::Courier: f.family = family.contains("New", Qt::CaseInsensitive) ? "Courier New" : "Courier"; break;
@@ -166,33 +169,5 @@ QStringList editFontFamilies() {
   QStringList out = {"Helvetica", "Times", "Courier"};
   for (const QString& f : QFontDatabase::families())
     if (!QFontDatabase::isPrivateFamily(f) && !f.startsWith('@') && !out.contains(f, Qt::CaseInsensitive)) out << f;
-  return out;
-}
-
-QStringList wrapText(const QString& text, const EditFont& font, double sizePt, double width) {
-  // Measured at a large size and scaled, for precision.
-  constexpr double kPx = 1000;
-  const QFont q = qtFont(font, kPx);
-  const double k = sizePt / kPx;
-  QStringList out;
-  for (const QString& para : text.split('\n')) {
-    if (width <= 0 || para.isEmpty()) {
-      out << para;
-      continue;
-    }
-    QTextLayout layout(para, q);
-    QTextOption opt;
-    opt.setWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
-    layout.setTextOption(opt);
-    layout.beginLayout();
-    for (QTextLine line = layout.createLine(); line.isValid(); line = layout.createLine()) line.setLineWidth(width / k);
-    layout.endLayout();
-    for (int i = 0; i < layout.lineCount(); ++i) {
-      const QTextLine line = layout.lineAt(i);
-      QString t = para.mid(line.textStart(), line.textLength());
-      while (t.endsWith(' ')) t.chop(1);
-      out << t;
-    }
-  }
   return out;
 }

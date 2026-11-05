@@ -59,21 +59,19 @@ void InlineTextEdit::setAutoWidth(bool on) {
   document()->setDefaultTextOption(opt);
 }
 
-void InlineTextEdit::setLineHeight(double px) {
+void InlineTextEdit::setLineHeight(double px, bool atLeast) {
   lineHeight_ = px;
   QTextCursor c(document());
   c.select(QTextCursor::Document);
   QTextBlockFormat f;
-  f.setLineHeight(px, QTextBlockFormat::FixedHeight);
+  f.setLineHeight(px, atLeast ? QTextBlockFormat::MinimumHeight : QTextBlockFormat::FixedHeight);
   c.mergeBlockFormat(f);
   // New lines typed take the current block's format, so they're spaced the same.
 }
 
 double InlineTextEdit::textWidth() const {
-  const QFontMetricsF fm(document()->defaultFont());
-  double w = 0;
-  for (const QString& line : toPlainText().split(QLatin1Char('\n'))) w = std::max(w, fm.horizontalAdvance(line));
-  return w;
+  // The widest line as laid out (its fonts and sizes), without the margins.
+  return std::max(0.0, document()->idealWidth() - 2 * document()->documentMargin());
 }
 
 void InlineTextEdit::keyPressEvent(QKeyEvent* e) {

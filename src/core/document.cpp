@@ -221,6 +221,15 @@ void Document::closePage(void* page) const {
   FPDF_ClosePage(static_cast<FPDF_PAGE>(page));
 }
 
+void Document::dropCachedPage(int index) const {
+  for (auto it = pages_.begin(); it != pages_.end(); ++it)
+    if (it->first == index) {
+      closePage(it->second);
+      pages_.erase(it);
+      return;
+    }
+}
+
 void Document::dropCachedPages() const {
   for (auto& [index, page] : pages_) closePage(page);
   pages_.clear();

@@ -285,7 +285,8 @@ void MainWindow::connectTab(DocumentTab* t) {
     if (t == tab()) updateStyleControls();
   });
   // Edit PDF.
-  for (auto sig : {&DocumentView::contentSelectionChanged, &DocumentView::contentEditStarted})
+  for (auto sig : {&DocumentView::contentSelectionChanged, &DocumentView::contentEditStarted,
+                   &DocumentView::contentEditStyleChanged})
     connect(v, sig, this, [this, t] {
       if (t == tab()) updateEditControls();
     });
@@ -487,12 +488,12 @@ void MainWindow::createActions() {
   connect(addImageAct_, &QAction::triggered, this, &MainWindow::addImage);
   {
     QSettings st;
-    newTextFont_.family = st.value("edit/font", QStringLiteral("Helvetica")).toString();
-    newTextFont_.bold = st.value("edit/bold", false).toBool();
-    newTextFont_.italic = st.value("edit/italic", false).toBool();
-    newTextSize_ = std::clamp(st.value("edit/size", 12.0).toDouble(), 1.0, 500.0);
-    newTextColor_ = QColor(st.value("edit/color", QStringLiteral("#000000")).toString());
-    if (!newTextColor_.isValid()) newTextColor_ = Qt::black;
+    newTextStyle_.font.family = st.value("edit/font", QStringLiteral("Helvetica")).toString();
+    newTextStyle_.font.bold = st.value("edit/bold", false).toBool();
+    newTextStyle_.font.italic = st.value("edit/italic", false).toBool();
+    newTextStyle_.size = std::clamp(st.value("edit/size", 12.0).toDouble(), 1.0, 500.0);
+    newTextStyle_.color = QColor(st.value("edit/color", QStringLiteral("#000000")).toString());
+    if (!newTextStyle_.color.isValid()) newTextStyle_.color = Qt::black;
   }
 
   saveFlatAct_ = new QAction(tr("Save as &Flattened…"), this);
@@ -859,15 +860,15 @@ void MainWindow::createToolBars() {
   editFontCombo_->setMaxVisibleItems(20);
   editFontCombo_->setMinimumContentsLength(14);
   connect(editFontCombo_, &QComboBox::activated, this,
-          [this](int i) { changeEditStyle(EditStyleChange{.family = editFontCombo_->itemData(i).toString()}); });
+          [this](int i) { changeEditStyle(TextStyleChange{.family = editFontCombo_->itemData(i).toString()}); });
   editBar_->addWidget(editFontCombo_);
   editSizeCombo_ = styleCombo(tr("Font size"));
   for (int pt : {6, 7, 8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 32, 36, 48, 60, 72}) editSizeCombo_->addItem(tr("%1 pt").arg(pt), double(pt));
   connect(editSizeCombo_, &QComboBox::activated, this,
-          [this](int i) { changeEditStyle(EditStyleChange{.size = editSizeCombo_->itemData(i).toDouble()}); });
+          [this](int i) { changeEditStyle(TextStyleChange{.size = editSizeCombo_->itemData(i).toDouble()}); });
   editBar_->addWidget(editSizeCombo_);
   editColorButton_ = styleButton(tr("Text color"));
-  editColorButton_->setMenu(colorMenu(editColorButton_, {}, [this](const QColor& c) { changeEditStyle(EditStyleChange{.color = c}); }));
+  editColorButton_->setMenu(colorMenu(editColorButton_, {}, [this](const QColor& c) { changeEditStyle(TextStyleChange{.color = c}); }));
   editBar_->addWidget(editColorButton_);
   editBoldAct_ = editBar_->addAction(tr("B"));
   editBoldAct_->setToolTip(tr("Bold"));
@@ -885,8 +886,49 @@ void MainWindow::createToolBars() {
       static_cast<QToolButton*>(w)->setToolButtonStyle(Qt::ToolButtonTextOnly);
     }
     connect(a, &QAction::triggered, this, [this, bold](bool on) {
-      changeEditStyle(bold ? EditStyleChange{.bold = on} : EditStyleChange{.italic = on});
+      changeEditStyle(bold ? TextStyleChange{.bold = on} : TextStyleChange{.italic = on});
     });
+  }
+  auto* alignGroup = new QActionGroup(this);
+  const QString editAlignTips[4] = {tr("Align Left"), tr("Center"), tr("Align Right"), tr("Justify")};
+  for (int i = 0; i < 4; ++i) {
+    QAction* a = editBar_->addAction(alignIcon(i, palette()), editAlignTips[i]);
+    a->setCheckable(true);
+    alignGroup->addAction(a);
+    if (auto* w = editBar_->widgetForAction(a)) {
+      w->setFocusPolicy(Qt::NoFocus);
+      static_cast<QToolButton*>(w)->setToolButtonStyle(Qt::ToolButtonIconOnly);
+    }
+    connect(a, &QAction::triggered, this, [this, i] { changeEditStyle(TextStyleChange{.align = pdfz::TextAlign(i)}); });
+    editAlignActs_[std::size_t(i)] = a;
+  }
+  // Turning and flipping what's selected (pictures, shapes, several things at once).
+  editBar_->addSeparator();
+  struct ObjectAction {
+    QIcon icon;
+    QString text;
+    std::function<pdfz::Affine(pdfz::PointF)> make;
+  };
+  const ObjectAction objectActions[] = {
+      {rotateIcon(false, palette()), tr("Rotate Left"), [](pdfz::PointF c) { return pdfz::Affine::rotate(-90, c); }},
+      {rotateIcon(true, palette()), tr("Rotate Right"), [](pdfz::PointF c) { return pdfz::Affine::rotate(90, c); }},
+      {flipIcon(true, palette()), tr("Flip Horizontal"), [](pdfz::PointF c) { return pdfz::Affine::scale(-1, 1, c); }},
+      {flipIcon(false, palette()), tr("Flip Vertical"), [](pdfz::PointF c) { return pdfz::Affine::scale(1, -1, c); }},
+  };
+  for (const ObjectAction& oa : objectActions) {
+    QAction* a = editBar_->addAction(oa.icon, oa.text);
+    a->setToolTip(oa.text);
+    if (auto* w = editBar_->widgetForAction(a)) {
+      w->setFocusPolicy(Qt::NoFocus);
+      static_cast<QToolButton*>(w)->setToolButtonStyle(Qt::ToolButtonIconOnly);
+    }
+    connect(a, &QAction::triggered, this, [this, make = oa.make, label = oa.text] {
+      if (DocumentTab* t = tab()) {
+        DocumentView* v = t->view();
+        v->transformContentSelection(make(v->contentSelectionCenter()), label);
+      }
+    });
+    objectActs_.push_back(a);
   }
   editBar_->hide();
 
@@ -1131,6 +1173,10 @@ void MainWindow::closeEvent(QCloseEvent* e) {
     }
   QSettings s;
   s.setValue("window/geometry", saveGeometry());
+  if (editBarShown_) {  // saved as it is without Edit PDF
+    editBar_->hide();
+    markupBar_->setVisible(commentBarWasShown_);
+  }
   s.setValue("window/state", saveState());
   e->accept();
 }
@@ -1426,14 +1472,25 @@ void MainWindow::updateFindStatus() {
 
 void MainWindow::applyTool() {
   DocumentTab* t = tab();
+  // Edit PDF's toolbar takes the comment tools' place while it's in use.
   const bool editing = t && t->hasDocument() && editAct_->isChecked();
-  editBar_->setVisible(editing);
+  if (editing != editBarShown_) {
+    if (editing) {
+      commentBarWasShown_ = markupBar_->isVisible();
+      markupBar_->hide();
+      editBar_->show();
+    } else {
+      editBar_->hide();
+      markupBar_->setVisible(commentBarWasShown_);
+    }
+    editBarShown_ = editing;
+  }
   if (!editAct_->isChecked()) addTextAct_->setChecked(false);
   if (!t) return;
   DocumentView* v = t->view();
   if (editAct_->isChecked()) {
     v->setTool(DocumentView::Tool::Edit);
-    v->setNewTextStyle(newTextFont_, newTextSize_, newTextColor_);
+    v->setNewTextStyle(newTextStyle_);
     v->setEditAddText(addTextAct_->isChecked());
     updateEditControls();
     return;
@@ -1531,38 +1588,35 @@ void MainWindow::updateStyleControls() {
 // ---------------------------------------------------------------------------------------------
 // Edit PDF
 
-// The style shown: of the text being typed in, else of the selected text, else of new text.
+// The style shown: where the text being typed in is, else of the selected text, else of new
+// text.
 void MainWindow::updateEditControls() {
   DocumentTab* t = tab();
-  EditFont font = newTextFont_;
-  double size = newTextSize_;
-  QColor color = newTextColor_;
-  bool textControls = true;
+  RichRun style = newTextStyle_;
+  pdfz::TextAlign align = pdfz::TextAlign::Left;
+  bool textControls = true, objects = false;
   if (t && t->hasDocument()) {
     DocumentView* v = t->view();
     int page;
     pdfz::ContentBlock b;
     if (const TextEditing* e = v->contentEditing()) {
-      font = e->font;
-      size = e->size;
-      color = e->color;
-    } else if (v->selectedContent(page, b)) {
-      if (b.kind == pdfz::ContentBlock::Kind::Text && b.editable) {
-        font = editFontFor(b);
-        size = b.fontSize;
-        color = toQColor(b.color);
-      } else {
-        textControls = false;  // a picture, or text that's turned
-      }
+      style = v->contentEditStyle();
+      align = e->align;
+    } else if (v->selectedContent(page, b) && b.kind == pdfz::ContentBlock::Kind::Text && b.editable) {
+      style = mainStyle(richFromBlock(b));
+      align = b.align;
+    } else if (v->hasContentSelection()) {
+      textControls = false;  // pictures, shapes, several things, or text that's turned
     }
+    objects = v->hasContentSelection() && !v->isEditingContent();
   }
-  int fi = editFontCombo_->findData(font.family);
+  int fi = editFontCombo_->findData(style.font.family);
   if (fi < 0) {
-    editFontCombo_->addItem(font.family, font.family);
+    editFontCombo_->addItem(style.font.family, style.font.family);
     fi = editFontCombo_->count() - 1;
   }
   editFontCombo_->setCurrentIndex(fi);
-  const double rounded = std::round(size * 10) / 10;
+  const double rounded = std::round(style.size * 10) / 10;
   int si = -1;
   for (int i = 0; i < editSizeCombo_->count(); ++i)
     if (std::abs(editSizeCombo_->itemData(i).toDouble() - rounded) < 0.05) si = i;
@@ -1573,54 +1627,46 @@ void MainWindow::updateEditControls() {
     si = at;
   }
   editSizeCombo_->setCurrentIndex(si);
-  editColorButton_->setIcon(textColorIcon(color, palette()));
-  editBoldAct_->setChecked(font.bold);
-  editItalicAct_->setChecked(font.italic);
+  editColorButton_->setIcon(textColorIcon(style.color, palette()));
+  editBoldAct_->setChecked(style.font.bold);
+  editItalicAct_->setChecked(style.font.italic);
   for (QWidget* w : std::initializer_list<QWidget*>{editFontCombo_, editSizeCombo_, editColorButton_}) w->setEnabled(textControls);
   editBoldAct_->setEnabled(textControls);
   editItalicAct_->setEnabled(textControls);
+  for (std::size_t i = 0; i < editAlignActs_.size(); ++i) {
+    editAlignActs_[i]->setEnabled(textControls);
+    editAlignActs_[i]->setChecked(int(align) == int(i));
+  }
+  for (QAction* a : objectActs_) a->setEnabled(objects);
 }
 
-void MainWindow::changeEditStyle(const EditStyleChange& c) {
+void MainWindow::changeEditStyle(const TextStyleChange& c) {
   DocumentTab* t = tab();
-  if (!t || !t->hasDocument()) return;
+  if (!t || !t->hasDocument() || c.empty()) return;
   DocumentView* v = t->view();
-  auto apply = [&c](EditFont& f, double& size, QColor& color) {
-    if (c.family) f.family = *c.family;
-    if (c.bold) f.bold = *c.bold;
-    if (c.italic) f.italic = *c.italic;
-    if (c.size) size = *c.size;
-    if (c.color && c.color->isValid()) color = *c.color;
-  };
   int page;
   pdfz::ContentBlock b;
   if (const TextEditing* e = v->contentEditing()) {
-    EditFont f = e->font;
-    double size = e->size;
-    QColor color = e->color;
-    apply(f, size, color);
     if (e->isNew) {  // what Add Text types in next looks like this too
-      newTextFont_ = f;
-      newTextSize_ = size;
-      newTextColor_ = color;
+      TextStyleChange chars = c;
+      chars.align.reset();
+      applyStyle(newTextStyle_, chars);
     }
-    v->restyleContentEdit(f, size, color);
+    v->restyleContentEdit(c);
   } else if (v->selectedContent(page, b) && b.kind == pdfz::ContentBlock::Kind::Text && b.editable) {
-    EditFont f = editFontFor(b);
-    double size = b.fontSize;
-    QColor color = toQColor(b.color);
-    apply(f, size, color);
-    t->restyleContent(page, b, f, size, color);
+    t->restyleContent(page, b, c);
   } else {
-    apply(newTextFont_, newTextSize_, newTextColor_);
+    TextStyleChange chars = c;
+    chars.align.reset();
+    applyStyle(newTextStyle_, chars);
   }
   QSettings st;
-  st.setValue("edit/font", newTextFont_.family);
-  st.setValue("edit/bold", newTextFont_.bold);
-  st.setValue("edit/italic", newTextFont_.italic);
-  st.setValue("edit/size", newTextSize_);
-  st.setValue("edit/color", newTextColor_.name());
-  v->setNewTextStyle(newTextFont_, newTextSize_, newTextColor_);
+  st.setValue("edit/font", newTextStyle_.font.family);
+  st.setValue("edit/bold", newTextStyle_.font.bold);
+  st.setValue("edit/italic", newTextStyle_.font.italic);
+  st.setValue("edit/size", newTextStyle_.size);
+  st.setValue("edit/color", newTextStyle_.color.name());
+  v->setNewTextStyle(newTextStyle_);
   updateEditControls();
 }
 

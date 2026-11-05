@@ -16,6 +16,7 @@
 #include <QElapsedTimer>
 #include <QImage>
 #include <QPoint>
+#include <QPolygonF>
 #include <QRectF>
 #include <QTimer>
 
@@ -108,26 +109,33 @@ public:
   void commitFieldEdit();
 
   // Edit PDF. With the Edit tool, blocks of the page's text and its pictures show with a
-  // frame: click one to select it (drag to move it, a picture's corners to resize it, Delete
-  // to remove it), click selected text to type in it. With "add text" on, a click starts new
-  // text there.
+  // frame, and shapes when the mouse is over them: click one to select it (Shift+click adds or
+  // takes away one more), or drag a box around several. The selection moves by dragging (or
+  // the arrow keys), resizes by its handles, turns by the handle above it, and Delete removes
+  // it. Click selected text to type in it. With "add text" on, a click starts new text there.
   void setEditAddText(bool on);
   bool editAddText() const { return editAddText_; }
-  void setNewTextStyle(const EditFont& font, double size, const QColor& color) {
-    editNewFont_ = font;
-    editNewSize_ = size;
-    editNewColor_ = color;
-  }
+  void setNewTextStyle(const RichRun& style) { editNewStyle_ = style; }
   void contentChanged(int page);  // the cache has been told: repaint
+  // The one block selected, if just one is.
   bool selectedContent(int& page, pdfz::ContentBlock& block) const;
+  bool hasContentSelection() const { return contentPage_ >= 0; }
   void selectContentAt(int page, pdfz::PointF point);  // the block there, if any
+  // The blocks with any of these objects (after they moved or turned).
+  void selectContentObjects(int page, const std::vector<int>& objects);
   void clearContentSelection();
+  // The selection moved, turned or flipped by `m` (about its middle: see selectionCenter()).
+  void transformContentSelection(const pdfz::Affine& m, const QString& label);
+  pdfz::PointF contentSelectionCenter() const;
   // Typing in text: an existing block's (which the tab has hidden) or new.
   void startContentEdit(const TextEditing& editing);
   void commitContentEdit();
   bool isEditingContent() const { return contentEditor_ != nullptr; }
   const TextEditing* contentEditing() const { return contentEditor_ ? &editing_ : nullptr; }
-  void restyleContentEdit(const EditFont& font, double size, const QColor& color);
+  // The style where the typing is (of the first selected character, if any are).
+  RichRun contentEditStyle() const;
+  // Restyles the selected characters, or all the text if none are selected.
+  void restyleContentEdit(const TextStyleChange& change);
   // Where new text or a picture would go: the middle of what's showing of the current page.
   bool visibleCenter(int& page, pdfz::PointF& point) const;
 
@@ -171,12 +179,12 @@ signals:
   void signatureFieldClicked(int page, const pdfz::RectF& rect);
   // Edit PDF.
   void contentSelectionChanged();
-  void contentMoved(int page, const std::vector<int>& objects, double dx, double dy);
-  void contentResized(int page, const std::vector<int>& objects, const pdfz::RectF& from, const pdfz::RectF& to);
+  void contentTransformed(int page, const std::vector<int>& objects, const pdfz::Affine& m, const QString& label);
   void contentDeleteRequested(int page, const std::vector<int>& objects);
   void contentEditRequested(int page, const pdfz::ContentBlock& block);
   void contentEditStarted();
-  void contentEditFinished(const TextEditing& editing, const QString& text);
+  void contentEditStyleChanged();  // the typing moved to text in another style
+  void contentEditFinished(const TextEditing& editing, const RichText& text);
   void editAddTextEnded();  // a click placed the new text: "add text" is off again
 
 protected:
@@ -255,9 +263,15 @@ private:
   void layoutFieldEditor(bool restyle);
   // Edit PDF.
   bool contentUnder(QPointF viewportPos, int& page, int& listPos) const;
-  int contentHandleUnder(QPointF viewportPos) const;  // a selected picture's corners
-  pdfz::RectF contentDragRect() const;  // the selected block as the drag has it
+  // The selection's handles: 0-7 round it from the top left, clockwise; 8 the turning one.
+  int contentHandleUnder(QPointF viewportPos) const;
+  bool contentHandlesShown() const;
+  pdfz::RectF contentSelectionRect() const;
+  std::vector<int> contentSelectionObjects() const;
+  pdfz::Affine contentDragAffine() const;  // what the drag does to the selection
+  QPolygonF contentOutline(int page, const pdfz::RectF& r, const pdfz::Affine& m) const;  // viewport
   void editPress(QMouseEvent* e);
+  void finishContentDrag();  // drag_ says which
   void startNewText(int page, QPointF point);
   void layoutContentEditor(bool restyle);
   void fitContentEditor();
@@ -273,7 +287,7 @@ private:
   int selPage_ = -1;   // the selected annotation
   int selIndex_ = -1;
   // A drag in progress on page dragPage_, in its display points.
-  enum class Drag { None, MoveAnnot, ResizeAnnot, Create, MoveContent, ResizeContent };
+  enum class Drag { None, MoveAnnot, ResizeAnnot, Create, MoveContent, ResizeContent, RotateContent, MarqueeContent };
   Drag drag_ = Drag::None;
   int dragPage_ = -1;
   QPointF dragStart_;
@@ -326,12 +340,13 @@ private:
   ContentCache* content_;
   bool editAddText_ = false;
   bool editPressWasSelected_ = false;  // the block pressed on was selected already
-  int contentPage_ = -1;           // the selected block
-  pdfz::ContentBlock contentSel_;
+  int contentPage_ = -1;           // the selected blocks' page
+  std::vector<pdfz::ContentBlock> contentSel_;
+  bool dragShift_ = false;         // Shift held at the press
+  int hoverContentPage_ = -1;      // a shape under the mouse
+  pdfz::RectF hoverContentRect_;
   InlineTextEdit* contentEditor_ = nullptr;
   TextEditing editing_;
   quint64 contentGeneration_ = 0;
-  EditFont editNewFont_{QStringLiteral("Helvetica")};  // for new text
-  double editNewSize_ = 12;
-  QColor editNewColor_ = Qt::black;
+  RichRun editNewStyle_{QString(), EditFont{QStringLiteral("Helvetica")}, 12, Qt::black, 0};  // new text
 };

@@ -13,8 +13,24 @@
 
 namespace pdfz {
 
+// A stretch of a block's text in one font, size and color.
+struct TextRun {
+  std::string text;          // UTF-8, with the block's spaces and line breaks
+  std::string fontName;      // the PDF font's name, e.g. "Arial-BoldMT" (subset tag removed)
+  std::string family;        // a family name guessed from it: "Arial", "Helvetica"
+  bool bold = false;
+  bool italic = false;
+  double size = 12;          // points
+  Color color{0, 0, 0};
+  double rise = 0;           // its baseline above the line's, points (superscripts > 0)
+  friend bool operator==(const TextRun&, const TextRun&) = default;
+};
+
+enum class TextAlign { Left, Center, Right, Justify };
+
 struct ContentBlock {
-  enum class Kind { Text, Image };
+  // Graphics: drawn shapes (paths), shadings and form XObjects, such as a logo or a line.
+  enum class Kind { Text, Image, Graphic };
   Kind kind = Kind::Text;
   RectF rect;                // display frame
   std::vector<int> objects;  // the page objects it's made of (indices on the page)
@@ -31,6 +47,12 @@ struct ContentBlock {
   double lineSpacing = 0;    // baseline to baseline, points (0: one line)
   // Where the first line starts, in the display frame: its left end on its baseline.
   PointF origin;
+  // The text in its fonts (font, size, color above are the first run's). Joined, the runs'
+  // text is `text`.
+  std::vector<TextRun> runs;
+  TextAlign align = TextAlign::Left;  // as the lines sit (one line: left)
+  // Where text after a tab ('\t' in the text) starts: points from the first line's start.
+  std::vector<double> tabStops;
 };
 
 // A font for new text: one of PDF's standard fonts (needs nothing embedded, Latin text only),
@@ -50,6 +72,44 @@ struct TextLines {
   double fontSize = 12;
   Color color{0, 0, 0};
   TextFont font;
+};
+
+// Text laid out for the page, in several fonts: each line a baseline apart (`advance` after
+// the first, at `origin`), and in pieces, each in one font.
+struct TextSpan {
+  std::string text;   // UTF-8
+  double x = 0;       // from the origin, points
+  int font = 0;       // in PlacedText::fonts
+  double size = 12;
+  Color color{0, 0, 0};
+  double rise = 0;    // above the line's baseline, points
+};
+struct PlacedLine {
+  std::vector<TextSpan> spans;
+  double advance = 0;  // from the line before's baseline to this one's (the first: 0)
+};
+struct PlacedText {
+  std::vector<PlacedLine> lines;
+  PointF origin;       // the first line's baseline, at the left of the box (display frame)
+  std::vector<TextFont> fonts;
+};
+
+// An affine map of the display frame: x' = a x + c y + e, y' = b x + d y + f.
+struct Affine {
+  double a = 1, b = 0, c = 0, d = 1, e = 0, f = 0;
+  PointF map(PointF p) const { return {a * p.x + c * p.y + e, b * p.x + d * p.y + f}; }
+  // This, then `next`.
+  Affine then(const Affine& n) const {
+    return {n.a * a + n.c * b, n.b * a + n.d * b, n.a * c + n.c * d, n.b * c + n.d * d, n.a * e + n.c * f + n.e,
+            n.b * e + n.d * f + n.f};
+  }
+  static Affine translate(double dx, double dy) { return {1, 0, 0, 1, dx, dy}; }
+  // Turning by `degrees` clockwise as shown (y grows downwards), about `center`.
+  static Affine rotate(double degrees, PointF center);
+  // Scaling about `anchor`.
+  static Affine scale(double sx, double sy, PointF anchor) {
+    return {sx, 0, 0, sy, anchor.x - sx * anchor.x, anchor.y - sy * anchor.y};
+  }
 };
 
 // Whether a standard font can show this text (the Windows-1252 characters).

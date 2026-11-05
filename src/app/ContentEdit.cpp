@@ -18,16 +18,31 @@ std::shared_ptr<const BlockList> ContentCache::get(int page) {
 }
 
 int blockAt(const BlockList& list, double x, double y, double tol) {
+  // Text and pictures before shapes (a highlight's rectangle behind text, a line under it),
+  // then the smallest.
   int best = -1;
   double bestArea = 0;
+  bool bestGraphic = true;
   for (int i = 0; i < int(list.size()); ++i) {
-    const pdfz::RectF& r = list[std::size_t(i)].rect;
+    const pdfz::ContentBlock& b = list[std::size_t(i)];
+    const pdfz::RectF& r = b.rect;
     if (x < r.left - tol || x > r.right + tol || y < r.top - tol || y > r.bottom + tol) continue;
     const double area = r.width() * r.height();
-    if (best < 0 || area < bestArea) {
+    const bool graphic = b.kind == pdfz::ContentBlock::Kind::Graphic;
+    if (best < 0 || (bestGraphic && !graphic) || (graphic == bestGraphic && area < bestArea)) {
       best = i;
       bestArea = area;
+      bestGraphic = graphic;
     }
   }
   return best;
+}
+
+std::vector<int> blocksIn(const BlockList& list, const pdfz::RectF& area) {
+  std::vector<int> out;
+  for (int i = 0; i < int(list.size()); ++i) {
+    const pdfz::RectF& r = list[std::size_t(i)].rect;
+    if (r.left >= area.left && r.right <= area.right && r.top >= area.top && r.bottom <= area.bottom) out.push_back(i);
+  }
+  return out;
 }

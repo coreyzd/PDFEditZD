@@ -18,7 +18,9 @@ struct EditFont {
 };
 
 // What a block's font is best edited as.
-EditFont editFontFor(const pdfz::ContentBlock& block);
+EditFont editFontFor(const pdfz::ContentBlock& block);  // its own (most of its text's) font
+EditFont editFontFor(const pdfz::TextRun& run);
+EditFont editFontFor(const std::string& pdfFamily, const std::string& fontName, bool bold, bool italic);
 // The Qt font to type and measure with, at `pixelSize`.
 QFont qtFont(const EditFont& f, double pixelSize);
 // The font to write `text` with: a standard font if it is one and can show the text, else the
@@ -30,5 +32,3 @@ pdfz::TextFont pdfFont(const EditFont& f, const QString& text, bool* complete = 
 // The standard families first, then the computer's.
 QStringList editFontFamilies();
 
-// Text laid out in lines no wider than `width` points (0: no limit), keeping its line breaks.
-QStringList wrapText(const QString& text, const EditFont& font, double sizePt, double width);
