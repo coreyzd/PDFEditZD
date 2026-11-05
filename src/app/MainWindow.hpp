@@ -168,6 +168,7 @@ private:
   QAction* signAct_;
   QAction* stampAct_;
   QAction* highlightFieldsAct_;
+  QAction* commentTipsAct_;
   QToolBar* fillBar_;
   QAction* editAct_;
   QAction* addTextAct_;

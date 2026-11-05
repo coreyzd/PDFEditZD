@@ -941,7 +941,7 @@ void DocumentView::updateHoverCursor(QPointF pos) {
     const pdfz::Annotation& a = (*annots_->get(page))[std::size_t(listPos)];
     // Hovering a comment shows its text, as a note's pop-up would.
     const QString tip = QString::fromStdString(a.contents).trimmed();
-    if (!tip.isEmpty() && tool_ == Tool::Select) {
+    if (commentTips_ && !tip.isEmpty() && tool_ == Tool::Select) {
       QString head = QString::fromStdString(a.author);
       if (head.isEmpty()) head = QString::fromLatin1(pdfz::kindName(a.kind));
       QToolTip::showText(viewport()->mapToGlobal(pos.toPoint()),
@@ -1945,6 +1945,11 @@ void DocumentView::paintContent(QPainter& p) {
 void DocumentView::setHighlightFields(bool on) {
   highlightFields_ = on;
   viewport()->update();
+}
+
+void DocumentView::setCommentTips(bool on) {
+  commentTips_ = on;
+  if (!on) QToolTip::hideText();
 }
 
 void DocumentView::fieldsChanged() {

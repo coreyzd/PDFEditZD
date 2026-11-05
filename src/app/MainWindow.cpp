@@ -305,6 +305,7 @@ void MainWindow::connectTab(DocumentTab* t) {
   connect(v, &DocumentView::signatureFieldClicked, this,
           [this, t](int page, const pdfz::RectF& rect) { signField(t, page, rect); });
   v->setHighlightFields(highlightFieldsAct_->isChecked());
+  v->setCommentTips(commentTipsAct_->isChecked());
   // Esc, again and again: out of the drag, the selection, and back to the Select tool.
   connect(v, &DocumentView::toolResetRequested, this, [this, t] {
     if (t == tab() && !selectToolAct_->isChecked()) selectToolAct_->trigger();
@@ -555,6 +556,16 @@ void MainWindow::createActions() {
       if (auto* t = qobject_cast<DocumentTab*>(tabs_->widget(i))) t->view()->setHighlightFields(on);
   });
 
+  commentTipsAct_ = new QAction(tr("Show Comment Text on &Hover"), this);
+  commentTipsAct_->setCheckable(true);
+  commentTipsAct_->setChecked(QSettings().value("comments/hoverText", true).toBool());
+  commentTipsAct_->setToolTip(tr("Hovering over a comment shows its text (AutoCAD drawings save their text as comments too)"));
+  connect(commentTipsAct_, &QAction::toggled, this, [this](bool on) {
+    QSettings().setValue("comments/hoverText", on);
+    for (int i = 0; i < tabs_->count(); ++i)
+      if (auto* t = qobject_cast<DocumentTab*>(tabs_->widget(i))) t->view()->setCommentTips(on);
+  });
+
   connect(toolGroup_, &QActionGroup::triggered, this, [this](QAction* picked) {
     // Another tool: the typing in a text box is over (the Select tool is where typing goes on).
     if (picked != selectToolAct_)
@@ -690,6 +701,7 @@ void MainWindow::createMenus() {
   comment->addAction(underlineSelAct_);
   comment->addAction(strikeSelAct_);
   comment->addSeparator();
+  comment->addAction(commentTipsAct_);
   comment->addAction(authorAct_);
 
   QMenu* fill = menuBar()->addMenu(tr("F&ill && Sign"));
@@ -734,6 +746,7 @@ void MainWindow::createMenus() {
   commentsPanel->setText(tr("Co&mments"));
   commentsPanel->setShortcut(QKeySequence(Qt::Key_F6));
   view->addAction(commentsPanel);
+  view->addAction(commentTipsAct_);
   view->addSeparator();
   view->addAction(nextTabAct_);
   view->addAction(prevTabAct_);

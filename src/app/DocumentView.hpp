@@ -103,6 +103,8 @@ public:
   // page, toggles a check box, opens a list of choices); Tab and Shift+Tab go through them.
   void setHighlightFields(bool on);
   bool highlightFields() const { return highlightFields_; }
+  // Hovering a comment shows its text (off for drawings whose text is all comments too).
+  void setCommentTips(bool on);
   // The fields changed (the cache has been told): repaint.
   void fieldsChanged();
   // Ends typing in a form field: emits fieldTextChanged if the text changed.
@@ -336,6 +338,7 @@ private:
   // Form fields.
   FieldCache* fields_;
   bool highlightFields_ = true;
+  bool commentTips_ = true;
   QWidget* fieldEditor_ = nullptr;  // FieldLineEdit or InlineTextEdit
   int fieldPage_ = -1;
   pdfz::FormField fieldEdited_;
