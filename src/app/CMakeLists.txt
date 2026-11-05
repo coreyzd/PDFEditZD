@@ -1,6 +1,7 @@
 set(CMAKE_AUTOMOC ON)
 
-find_package(Qt6 6.4 REQUIRED COMPONENTS Core Gui Widgets PrintSupport)
+# Qt SVG reads SVG files for stamps and signatures (MSYS2: mingw-w64-ucrt-x86_64-qt6-svg).
+find_package(Qt6 6.4 REQUIRED COMPONENTS Core Gui Widgets PrintSupport Svg)
 
 add_executable(pdfeditzd
   main.cpp
@@ -23,6 +24,7 @@ add_executable(pdfeditzd
   Fonts.cpp
   ContentEdit.cpp
   RichText.cpp
+  VectorArt.cpp
   SignatureDialog.cpp
   CommentDialog.cpp
   CommentsPanel.cpp
@@ -39,7 +41,7 @@ if(WIN32)
 endif()
 
 target_link_libraries(pdfeditzd PRIVATE pdfz_core pdfz_warnings
-  Qt6::Core Qt6::Gui Qt6::Widgets Qt6::PrintSupport)
+  Qt6::Core Qt6::Gui Qt6::Widgets Qt6::PrintSupport Qt6::Svg)
 if(WIN32)
   target_link_libraries(pdfeditzd PRIVATE winspool gdi32)  # WinPrint: printing through the Windows API
 endif()

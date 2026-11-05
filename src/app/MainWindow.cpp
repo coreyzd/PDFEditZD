@@ -216,6 +216,11 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
   onCurrentTabChanged();
 }
 
+void MainWindow::changeEvent(QEvent* e) {
+  if (e->type() == QEvent::WindowStateChange && fullScreenAct_) fullScreenAct_->setChecked(isFullScreen());
+  QMainWindow::changeEvent(e);
+}
+
 MainWindow::~MainWindow() {
   // Tabs first: their panels sit in this window's docks.
   while (tabs_->count() > 0) delete tabs_->widget(0);
@@ -263,7 +268,8 @@ void MainWindow::connectTab(DocumentTab* t) {
   });
   connect(v, &DocumentView::selectionChanged, this, [this, t](bool has) {
     if (t != tab()) return;
-    for (QAction* a : {copyAct_, highlightSelAct_, underlineSelAct_, strikeSelAct_}) a->setEnabled(has);
+    for (QAction* a : {highlightSelAct_, underlineSelAct_, strikeSelAct_}) a->setEnabled(has);
+    updateClipboardActions();
   });
   connect(v, &DocumentView::annotationSelectionChanged, this, [this, t] {
     if (t == tab()) updateStyleControls();
@@ -401,9 +407,49 @@ void MainWindow::createActions() {
   copyAct_ = new QAction(themeIcon("edit-copy"), tr("&Copy"), this);
   copyAct_->setShortcut(QKeySequence::Copy);
   connect(copyAct_, &QAction::triggered, this, &MainWindow::copySelection);
-  selectAllAct_ = new QAction(tr("Select &All Text"), this);
+  selectAllAct_ = new QAction(tr("Select &All"), this);
   selectAllAct_->setShortcut(QKeySequence::SelectAll);
-  connect(selectAllAct_, &QAction::triggered, this, [this] { if (auto* t = tab()) t->view()->selectAll(); });
+  connect(selectAllAct_, &QAction::triggered, this, [this] {
+    DocumentTab* t = tab();
+    if (!t) return;
+    // Edit PDF: everything on the page; otherwise all the text.
+    if (editAct_->isChecked()) t->view()->selectAllContent(t->view()->currentPage());
+    else t->view()->selectAll();
+  });
+  // Edit PDF's clipboard: text, pictures and shapes, between documents too.
+  cutAct_ = new QAction(themeIcon("edit-cut"), tr("Cu&t"), this);
+  cutAct_->setShortcut(QKeySequence::Cut);
+  connect(cutAct_, &QAction::triggered, this, [this] {
+    if (DocumentTab* t = tab()) t->copyContent(true);
+  });
+  pasteAct_ = new QAction(themeIcon("edit-paste"), tr("&Paste"), this);
+  pasteAct_->setShortcut(QKeySequence::Paste);
+  pasteAct_->setToolTip(tr("Paste: what was copied with Edit PDF goes where it was on its page"));
+  connect(pasteAct_, &QAction::triggered, this, [this] {
+    DocumentTab* t = tab();
+    if (!t || !t->hasDocument()) return;
+    if (!editAct_->isChecked()) editAct_->trigger();
+    if (!t->pasteContent(t->view()->currentPage())) statusBar()->showMessage(tr("Nothing to paste"), 3000);
+  });
+  connect(QGuiApplication::clipboard(), &QClipboard::dataChanged, this, [this] { updateClipboardActions(); });
+  deleteContentAct_ = new QAction(tr("&Delete"), this);
+  connect(deleteContentAct_, &QAction::triggered, this, [this] {
+    if (DocumentTab* t = tab()) t->view()->deleteContentSelection();
+  });
+  const QString arrangeNames[4] = {tr("Bring to &Front"), tr("Bring &Forward"), tr("Send &Backward"), tr("Send to Bac&k")};
+  const pdfz::Arrange arrangeHow[4] = {pdfz::Arrange::ToFront, pdfz::Arrange::Forward, pdfz::Arrange::Backward,
+                                       pdfz::Arrange::ToBack};
+  const QKeySequence arrangeKeys[4] = {QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_BracketRight),
+                                       QKeySequence(Qt::CTRL | Qt::Key_BracketRight), QKeySequence(Qt::CTRL | Qt::Key_BracketLeft),
+                                       QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_BracketLeft)};
+  for (int i = 0; i < 4; ++i) {
+    auto* a = new QAction(arrangeNames[i], this);
+    a->setShortcut(arrangeKeys[i]);
+    connect(a, &QAction::triggered, this, [this, how = arrangeHow[i]] {
+      if (DocumentTab* t = tab()) t->arrangeContent(how);
+    });
+    arrangeActs_[std::size_t(i)] = a;
+  }
 
   findAct_ = new QAction(themeIcon("edit-find"), tr("&Find…"), this);
   findAct_->setShortcut(QKeySequence::Find);
@@ -618,7 +664,9 @@ void MainWindow::createMenus() {
   edit->addAction(undoAct_);
   edit->addAction(redoAct_);
   edit->addSeparator();
+  edit->addAction(cutAct_);
   edit->addAction(copyAct_);
+  edit->addAction(pasteAct_);
   edit->addAction(selectAllAct_);
   edit->addSeparator();
   edit->addAction(findAct_);
@@ -628,6 +676,8 @@ void MainWindow::createMenus() {
   edit->addAction(editAct_);
   edit->addAction(addTextAct_);
   edit->addAction(addImageAct_);
+  arrangeMenu_ = edit->addMenu(tr("A&rrange"));
+  for (QAction* a : arrangeActs_) arrangeMenu_->addAction(a);
 
   QMenu* comment = menuBar()->addMenu(tr("&Comment"));
   for (int i = 0; i < kCommentToolCount; ++i) comment->addAction(markupActs_[std::size_t(i)]);
@@ -687,6 +737,22 @@ void MainWindow::createMenus() {
   view->addSeparator();
   view->addAction(nextTabAct_);
   view->addAction(prevTabAct_);
+  view->addSeparator();
+  fullScreenAct_ = view->addAction(tr("&Full Screen"));
+  fullScreenAct_->setCheckable(true);
+  fullScreenAct_->setShortcut(QKeySequence(Qt::Key_F11));
+  fullScreenAct_->setShortcutContext(Qt::ApplicationShortcut);
+  connect(fullScreenAct_, &QAction::triggered, this, [this](bool on) {
+    if (on == isFullScreen()) return;
+    if (on) {
+      wasMaximized_ = isMaximized();
+      showFullScreen();
+    } else if (wasMaximized_) {
+      showMaximized();
+    } else {
+      showNormal();
+    }
+  });
 
   QMenu* help = menuBar()->addMenu(tr("&Help"));
   help->addAction(aboutAct_);
@@ -930,6 +996,14 @@ void MainWindow::createToolBars() {
     });
     objectActs_.push_back(a);
   }
+  // Draw order.
+  auto* arrangeButton = new QToolButton(this);
+  arrangeButton->setText(tr("Arrange"));
+  arrangeButton->setToolTip(tr("Arrange: bring the selection to the front, send it to the back..."));
+  arrangeButton->setMenu(arrangeMenu_);
+  arrangeButton->setPopupMode(QToolButton::InstantPopup);
+  arrangeButton->setFocusPolicy(Qt::NoFocus);
+  editBar_->addWidget(arrangeButton);
   editBar_->hide();
 
   // In the View menu, under the panels.
@@ -998,12 +1072,14 @@ void MainWindow::updateUi() {
   signAct_->setEnabled(has);
   stampAct_->setEnabled(has);
   for (QAction* a : {editAct_, addTextAct_, addImageAct_}) a->setEnabled(has);
+  updateClipboardActions();
   extractAct_->setEnabled(has);
   splitAct_->setEnabled(has && t->document()->pageCount() > 1);
   signMenu_->setEnabled(has);
   saveFlatAct_->setEnabled(has);
   const bool sel = has && t->view()->hasSelection();
-  for (QAction* a : {copyAct_, highlightSelAct_, underlineSelAct_, strikeSelAct_}) a->setEnabled(sel);
+  for (QAction* a : {highlightSelAct_, underlineSelAct_, strikeSelAct_}) a->setEnabled(sel);
+  updateClipboardActions();
   static const pdfz::EditHistory none;
   const pdfz::EditHistory& h = has ? t->history() : none;
   undoAct_->setEnabled(has && h.canUndo());
@@ -1172,6 +1248,10 @@ void MainWindow::closeEvent(QCloseEvent* e) {
       return;
     }
   QSettings s;
+  if (isFullScreen()) {  // not to start in full screen next time
+    if (wasMaximized_) showMaximized();
+    else showNormal();
+  }
   s.setValue("window/geometry", saveGeometry());
   if (editBarShown_) {  // saved as it is without Edit PDF
     editBar_->hide();
@@ -1378,6 +1458,10 @@ void MainWindow::rotatePages(int degrees) {
 void MainWindow::copySelection() {
   DocumentTab* t = tab();
   if (!t) return;
+  if (editAct_->isChecked() && t->view()->hasContentSelection()) {
+    t->copyContent(false);
+    return;
+  }
   const QString text = t->view()->selectedText();
   if (text.isEmpty()) return;
   QGuiApplication::clipboard()->setText(text);
@@ -1638,6 +1722,18 @@ void MainWindow::updateEditControls() {
     editAlignActs_[i]->setChecked(int(align) == int(i));
   }
   for (QAction* a : objectActs_) a->setEnabled(objects);
+  updateClipboardActions();
+}
+
+void MainWindow::updateClipboardActions() {
+  DocumentTab* t = tab();
+  const bool has = t && t->hasDocument();
+  const bool content = has && editAct_->isChecked() && t->view()->hasContentSelection() && !t->view()->isEditingContent();
+  copyAct_->setEnabled(content || (has && t->view()->hasSelection()));
+  cutAct_->setEnabled(content);
+  deleteContentAct_->setEnabled(content);
+  for (QAction* a : arrangeActs_) a->setEnabled(content);
+  pasteAct_->setEnabled(has && DocumentTab::canPaste());
 }
 
 void MainWindow::changeEditStyle(const TextStyleChange& c) {
@@ -1727,6 +1823,22 @@ void MainWindow::markupSelection(MarkupTool tool) {
 void MainWindow::showViewMenu(DocumentTab* t, const QPoint& globalPos, int page, int annotIndex) {
   if (t != tab() || !t->hasDocument()) return;
   QMenu menu(this);
+  if (editAct_->isChecked()) {
+    // Edit PDF: like Acrobat's.
+    updateClipboardActions();
+    menu.addAction(cutAct_);
+    menu.addAction(copyAct_);
+    menu.addAction(pasteAct_);
+    menu.addAction(deleteContentAct_);
+    menu.addSeparator();
+    menu.addAction(selectAllAct_);
+    menu.addSeparator();
+    for (QAction* a : objectActs_) menu.addAction(a);
+    menu.addSeparator();
+    menu.addMenu(arrangeMenu_);
+    menu.exec(globalPos);
+    return;
+  }
   if (annotIndex >= 0) {
     const pdfz::Annotation* a = t->annotation(page, annotIndex);
     const bool textBox = a && a->kind == pdfz::AnnotKind::FreeText;
@@ -1816,6 +1928,12 @@ void MainWindow::fillSignMenu(QMenu* menu) {
   menu->addAction(tr("Add Initials…"), this, [this] { sign(std::nullopt, true); });
   if (!saved.isEmpty()) {
     menu->addSeparator();
+    QMenu* exportMenu = menu->addMenu(tr("Export Saved…"));
+    for (const Signature& s : saved) {
+      QAction* a = exportMenu->addAction(QIcon(QPixmap::fromImage(s.preview(QSize(100, 30), dpr))),
+                                         s.initials ? tr("Initials") : tr("Signature"), this, [this, s] { exportSignatureAs(s); });
+      a->setIconVisibleInMenu(true);
+    }
     QMenu* remove = menu->addMenu(tr("Remove Saved"));
     for (const Signature& s : saved) {
       QAction* a = remove->addAction(QIcon(QPixmap::fromImage(s.preview(QSize(100, 30), dpr))),
@@ -1826,6 +1944,30 @@ void MainWindow::fillSignMenu(QMenu* menu) {
       a->setIconVisibleInMenu(true);
     }
   }
+}
+
+// A saved signature as an SVG or PDF file, for use elsewhere (sharp at any size, unless it's
+// a picture).
+void MainWindow::exportSignatureAs(const Signature& sig) {
+  QSettings st;
+  const QString dir = st.value("signatures/exportDir", QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation)).toString();
+  QString filter = st.value("signatures/exportFilter").toString();
+  const QString svg = tr("SVG drawing (*.svg)"), pdf = tr("PDF (*.pdf)");
+  if (filter != svg && filter != pdf) filter = svg;
+  QString path = QFileDialog::getSaveFileName(this, sig.initials ? tr("Export Initials") : tr("Export Signature"),
+                                              dir + "/" + (sig.initials ? tr("Initials") : tr("Signature")) +
+                                                  (filter == pdf ? ".pdf" : ".svg"),
+                                              svg + ";;" + pdf, &filter);
+  if (path.isEmpty()) return;
+  if (!path.endsWith(".svg", Qt::CaseInsensitive) && !path.endsWith(".pdf", Qt::CaseInsensitive))
+    path += filter == pdf ? ".pdf" : ".svg";
+  st.setValue("signatures/exportDir", QFileInfo(path).absolutePath());
+  st.setValue("signatures/exportFilter", filter);
+  QString error;
+  if (exportSignature(sig, path, &error))
+    statusBar()->showMessage(tr("Exported to %1").arg(QDir::toNativeSeparators(path)), 4000);
+  else
+    QMessageBox::warning(this, tr("Export"), error);
 }
 
 std::optional<Signature> MainWindow::newSignature(bool initials) {
@@ -2079,10 +2221,18 @@ void MainWindow::splitDocument() {
 // ---------------------------------------------------------------------------------------------
 // Stamps
 
+// The Stamp menu: favorites, then the standard stamps and your own in menus of their own.
+// Each one has a star beside it that makes it a favorite (or not).
 void MainWindow::fillStampMenu(QMenu* menu) {
   menu->clear();
-  auto addPreview = [&](const QImage& preview, const QString& tip, std::function<void()> act) {
-    auto* button = new QToolButton(menu);
+  const QStringList favorites = StampFavorites::load();
+  auto addRow = [this](QMenu* into, const QImage& preview, const QString& tip, const QString& key,
+                       std::function<void()> act) {
+    auto* row = new QWidget(into);
+    auto* lay = new QHBoxLayout(row);
+    lay->setContentsMargins(2, 0, 2, 0);
+    lay->setSpacing(2);
+    auto* button = new QToolButton(row);
     button->setAutoRaise(true);
     const QSize box(160, 34);
     QImage fitted(box * 2, QImage::Format_ARGB32_Premultiplied);
@@ -2100,47 +2250,125 @@ void MainWindow::fillStampMenu(QMenu* menu) {
     button->setIcon(QIcon(QPixmap::fromImage(fitted)));
     button->setToolTip(tip);
     button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-    auto* action = new QWidgetAction(menu);
-    action->setDefaultWidget(button);
-    connect(button, &QToolButton::clicked, this, [menu, act] {
-      menu->close();
+    lay->addWidget(button, 1);
+    auto* star = new QToolButton(row);
+    star->setAutoRaise(true);
+    star->setCheckable(true);
+    star->setChecked(StampFavorites::contains(key));
+    auto showStar = [star] {
+      star->setText(star->isChecked() ? QStringLiteral("\u2605") : QStringLiteral("\u2606"));
+      star->setStyleSheet(star->isChecked() ? QStringLiteral("QToolButton { color: #E6A117; }") : QString());
+      star->setToolTip(star->isChecked() ? tr("Remove from Favorites") : tr("Add to Favorites"));
+    };
+    showStar();
+    QFont f = star->font();
+    f.setPointSizeF(f.pointSizeF() * 1.4);
+    star->setFont(f);
+    connect(star, &QToolButton::toggled, this, [key, showStar](bool on) {
+      StampFavorites::set(key, on);
+      showStar();
+    });
+    lay->addWidget(star);
+    auto* action = new QWidgetAction(into);
+    action->setDefaultWidget(row);
+    connect(button, &QToolButton::clicked, this, [menu = into, act] {
+      // The whole menu closes, submenu and all.
+      for (QWidget* w = menu; w; w = qobject_cast<QMenu*>(w->parentWidget())) w->close();
       act();
     });
-    menu->addAction(action);
+    into->addAction(action);
   };
+
   const QString author = commentAuthor();
-  for (const StampStyle& st : standardStamps()) {
+  const QList<StampStyle> standard = standardStamps();
+  const auto custom = CustomStamps::load();
+  auto addStandard = [&](QMenu* into, const StampStyle& st) {
     const MadeStamp made = makeStamp(st, author);
-    addPreview(made.preview, st.title, [this, st, author] { placeStamp(makeStamp(st, author), st.title); });
+    addRow(into, made.preview, st.title, StampFavorites::standardKey(st),
+           [this, st, author] { placeStamp(makeStamp(st, author), st.title); });
+  };
+  auto addCustom = [&](QMenu* into, const CustomStamps::Entry& c) {
+    const MadeStamp made = c.made();
+    addRow(into, made.preview, tr("Your stamp"), c.key(), [this, c] { placeStamp(c.made(), tr("Stamp")); });
+  };
+
+  // Favorites, in the order they were picked.
+  int shown = 0;
+  for (const QString& key : favorites) {
+    for (const StampStyle& st : standard)
+      if (StampFavorites::standardKey(st) == key) {
+        addStandard(menu, st);
+        ++shown;
+      }
+    for (const auto& c : custom)
+      if (c.key() == key) {
+        addCustom(menu, c);
+        ++shown;
+      }
+  }
+  if (shown == 0) {
+    QAction* hint = menu->addAction(tr("No favorites yet: click a stamp's star to add it"));
+    hint->setEnabled(false);
   }
   menu->addSeparator();
-  const auto custom = CustomStamps::load();
-  for (const auto& c : custom) {
-    const MadeStamp made = makeImageStamp(c.image);
-    addPreview(made.preview, tr("Your stamp"), [this, img = c.image] { placeStamp(makeImageStamp(img), tr("Stamp")); });
-  }
-  menu->addAction(tr("Add a Stamp from a Picture…"), this, [this] {
-    const QString path = QFileDialog::getOpenFileName(this, tr("Stamp Picture"), lastDir(),
-                                                      tr("Images (*.png *.jpg *.jpeg *.bmp *.gif *.tif *.tiff)"));
-    if (path.isEmpty()) return;
-    QImageReader reader(path);
-    reader.setAutoTransform(true);
-    const QImage img = reader.read();
-    if (img.isNull()) {
-      QMessageBox::warning(this, tr("Stamp"), tr("That picture couldn't be read."));
-      return;
-    }
-    CustomStamps::add(img);
-    placeStamp(makeImageStamp(img), tr("Stamp"));
-  });
+  QMenu* standardMenu = menu->addMenu(tr("Standard"));
+  for (const StampStyle& st : standard) addStandard(standardMenu, st);
+  QMenu* customMenu = menu->addMenu(tr("Custom"));
+  for (const auto& c : custom) addCustom(customMenu, c);
+  if (!custom.isEmpty()) customMenu->addSeparator();
+  customMenu->addAction(tr("Add a Stamp from a File…"), this, &MainWindow::addStampFromFile);
   if (!custom.isEmpty()) {
-    QMenu* remove = menu->addMenu(tr("Remove a Stamp of Yours"));
+    QMenu* remove = customMenu->addMenu(tr("Remove a Stamp of Yours"));
     for (const auto& c : custom) {
-      QAction* a = remove->addAction(QIcon(QPixmap::fromImage(c.image.scaled(64, 32, Qt::KeepAspectRatio))), tr("Stamp"), this,
+      const QImage icon = c.art.isEmpty() ? c.image.scaled(64, 32, Qt::KeepAspectRatio, Qt::SmoothTransformation)
+                                          : c.art.preview(QSize(64, 32), devicePixelRatioF());
+      QAction* a = remove->addAction(QIcon(QPixmap::fromImage(icon)), tr("Stamp"), this,
                                      [path = c.path] { CustomStamps::remove(path); });
       a->setIconVisibleInMenu(true);
     }
   }
+  menu->addSeparator();
+  menu->addAction(tr("Add a Stamp from a File…"), this, &MainWindow::addStampFromFile);
+}
+
+// A drawing (SVG, PDF: kept as shapes, sharp at any size) or a picture, saved as a stamp of
+// your own and placed.
+void MainWindow::addStampFromFile() {
+  QStringList patterns = vectorPatterns();
+  patterns << QStringList{"*.png", "*.jpg", "*.jpeg", "*.bmp", "*.gif", "*.tif", "*.tiff"};
+  const QString path = QFileDialog::getOpenFileName(
+      this, tr("Stamp File"), lastDir(),
+      tr("Drawings and pictures (%1);;Drawings (%2);;All files (*)").arg(patterns.join(' '), vectorPatterns().join(' ')));
+  if (path.isEmpty()) return;
+  if (isVectorFile(path)) {
+    QString error;
+    bool pictures = false;
+    const VectorArt art = readVectorFile(path, &error, &pictures).normalized();
+    if (!art.isEmpty()) {
+      CustomStamps::add(art);
+      if (pictures) statusBar()->showMessage(tr("Pictures in the file aren't part of the stamp, only what's drawn."), 6000);
+      placeStamp(makeVectorStamp(art), tr("Stamp"));
+      return;
+    }
+    // Nothing drawn in it (a scan saved as a PDF): it's a picture after all.
+    const QImage img = renderVectorFile(path, 1600);
+    if (img.isNull()) {
+      QMessageBox::warning(this, tr("Stamp"), error.isEmpty() ? tr("Nothing to use was found in that file.") : error);
+      return;
+    }
+    CustomStamps::add(img);
+    placeStamp(makeImageStamp(img), tr("Stamp"));
+    return;
+  }
+  QImageReader reader(path);
+  reader.setAutoTransform(true);
+  const QImage img = reader.read();
+  if (img.isNull()) {
+    QMessageBox::warning(this, tr("Stamp"), tr("That picture couldn't be read."));
+    return;
+  }
+  CustomStamps::add(img);
+  placeStamp(makeImageStamp(img), tr("Stamp"));
 }
 
 void MainWindow::placeStamp(const MadeStamp& stamp, const QString& subject) {

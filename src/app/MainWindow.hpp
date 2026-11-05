@@ -42,6 +42,7 @@ public:
 
 protected:
   void closeEvent(QCloseEvent* e) override;
+  void changeEvent(QEvent* e) override;
   void dragEnterEvent(QDragEnterEvent* e) override;
   void dropEvent(QDropEvent* e) override;
 
@@ -111,12 +112,15 @@ private:
   std::optional<Signature> newSignature(bool initials);  // the dialog; saved if asked
   void saveFlattened();
   void fillStampMenu(QMenu* menu);
+  void addStampFromFile();
+  void exportSignatureAs(const Signature& sig);
   void placeStamp(const MadeStamp& stamp, const QString& subject);
   // Edit PDF.
   // The text typed in (its selected characters, or all of it), else the selected text, else
   // new text.
   void changeEditStyle(const TextStyleChange& change);
   void updateEditControls();
+  void updateClipboardActions();  // cut, copy, paste, delete, arrange
   void addImage();
 
   QStackedWidget* central_;
@@ -169,6 +173,8 @@ private:
   QAction* addTextAct_;
   QAction* addImageAct_;
   QToolBar* editBar_;
+  QAction* fullScreenAct_ = nullptr;
+  bool wasMaximized_ = false;
   bool editBarShown_ = false;   // in place of the comment tools, which were shown or not:
   bool commentBarWasShown_ = true;
   QComboBox* editFontCombo_;
@@ -178,6 +184,11 @@ private:
   QAction* editItalicAct_;
   std::array<QAction*, 4> editAlignActs_{};
   std::vector<QAction*> objectActs_;  // turn and flip: for a selection
+  QAction* cutAct_;
+  QAction* pasteAct_;
+  QAction* deleteContentAct_;
+  std::array<QAction*, 4> arrangeActs_{};  // to front, forward, backward, to back
+  QMenu* arrangeMenu_;
   RichRun newTextStyle_;   // what Add Text types in
   QMenu* signMenu_;
   QAction* selectToolAct_;

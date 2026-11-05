@@ -21,6 +21,14 @@ struct Paper {
   double heightPt = 0;
 };
 
+// The paper for a page: one of the printer's sizes, or a size of its own (`widthPt` and
+// `heightPt` above zero) given to a custom-size paper (a roll on a plotter).
+struct PaperRequest {
+  short id = 0;
+  std::wstring form;          // the paper's name, which some drivers go by
+  double widthPt = 0, heightPt = 0;
+};
+
 struct Bin {
   short id = 0;           // DMBIN_*, or the driver's own
   std::wstring name;      // "Bypass Tray", "Drawer 1"...
@@ -57,11 +65,11 @@ public:
   // The driver's own dialog, starting from (and keeping) these settings. False if canceled.
   bool showProperties(void* parentHwnd);
 
-  Geometry geometry(short paper, short bin);
+  Geometry geometry(const PaperRequest& paper, short bin);
 
   // The job. Copies, color and two-sided apply to it all; paper and bin to each page.
   bool begin(const std::wstring& docName, int copies, bool color, bool duplex);
-  bool startPage(short paper, short bin);  // DMBIN_AUTO (7) leaves the tray to the printer
+  bool startPage(const PaperRequest& paper, short bin);  // DMBIN_AUTO (7) leaves the tray to the printer
   const Geometry& pageGeometry() const { return page_; }
   // 24-bit pixels, rows top first (stride bytes apart), at device pixel (x, y) from the
   // printable area's top-left.

@@ -191,6 +191,13 @@ bool loadPageImage(const QString& path, pdfz::Document::PageImage& out, QString*
     if (error) *error = QObject::tr("%1 couldn't be read as a picture.").arg(QFileInfo(path).fileName());
     return false;
   }
+  out = pageImageFrom(img);
+  return true;
+}
+
+pdfz::Document::PageImage pageImageFrom(QImage img) {
+  pdfz::Document::PageImage out;
+  if (img.isNull()) return out;
   // On white, as paper; and no bigger than a page needs (300 DPI across a large sheet).
   if (img.width() > 4000 || img.height() > 4000) img = img.scaled(4000, 4000, Qt::KeepAspectRatio, Qt::SmoothTransformation);
   QImage opaque(img.size(), QImage::Format_ARGB32);
@@ -205,5 +212,5 @@ bool loadPageImage(const QString& path, pdfz::Document::PageImage& out, QString*
   for (int y = 0; y < opaque.height(); ++y)
     std::memcpy(out.bgra.data() + std::size_t(y) * std::size_t(out.width) * 4, opaque.constScanLine(y),
                 std::size_t(out.width) * 4);  // ARGB32 is B, G, R, A in memory on Windows and Linux PCs
-  return true;
+  return out;
 }

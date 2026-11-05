@@ -6,6 +6,7 @@ add_library(pdfz_core STATIC
   annotations.cpp
   forms.cpp
   content.cpp
+  objects.cpp
 )
 target_include_directories(pdfz_core PUBLIC ${PROJECT_SOURCE_DIR}/src)
 target_link_libraries(pdfz_core PUBLIC PDFium::pdfium PRIVATE pdfz_warnings)

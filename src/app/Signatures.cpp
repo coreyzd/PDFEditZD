@@ -55,6 +55,7 @@ bool Signature::isEmpty() const {
     case Kind::Drawn: return strokes.isEmpty();
     case Kind::Typed: return text.trimmed().isEmpty();
     case Kind::Image: return image.isNull();
+    case Kind::Vector: return art.isEmpty();
   }
   return true;
 }
@@ -76,11 +77,56 @@ QPainterPath Signature::outline() const {
 
 QSizeF Signature::size() const {
   if (kind == Kind::Image) return image.size();
+  if (kind == Kind::Vector) return art.bounds().size();
   return outline().boundingRect().size();
+}
+
+VectorArt Signature::vectorArt() const {
+  if (kind == Kind::Vector) return art;
+  VectorArt out;
+  if (kind == Kind::Drawn || kind == Kind::Typed) {
+    const QPainterPath path = outline();
+    if (!path.isEmpty()) out.shapes << VectorShape{path, color};
+  }
+  return out;
+}
+
+QSizeF Signature::placedSize() const {
+  // About a third of an inch tall for a signature, less for initials, and never wider than a
+  // long signature line.
+  const QSizeF s = size();
+  if (s.isEmpty()) return {};
+  double h = initials ? 20 : 30;
+  double w = h * s.width() / s.height();
+  const double maxW = initials ? 80 : 200;
+  if (w > maxW) {
+    h *= maxW / w;
+    w = maxW;
+  }
+  return {w, h};
+}
+
+bool exportSignature(const Signature& s, const QString& file, QString* error) {
+  const QSizeF size = s.placedSize();
+  if (size.isEmpty()) return false;
+  const bool pdf = file.endsWith(QLatin1String(".pdf"), Qt::CaseInsensitive);
+  const VectorArt art = s.vectorArt();
+  if (pdf) {
+    if (writeVectorPdf(file, art, size, s.image)) return true;
+  } else {
+    QSaveFile f(file);
+    if (f.open(QIODevice::WriteOnly)) {
+      f.write(art.isEmpty() ? imageSvg(s.image, size) : art.toSvg(size));
+      if (f.commit()) return true;
+    }
+  }
+  if (error) *error = QObject::tr("Couldn't write %1.").arg(file);
+  return false;
 }
 
 pdfz::StampDrawing Signature::drawing() const {
   pdfz::StampDrawing d;
+  if (kind == Kind::Vector) return art.drawing();
   if (kind == Kind::Image) {
     const QImage img = image.convertToFormat(QImage::Format_ARGB32);  // straight alpha
     d.width = img.width();
@@ -123,6 +169,8 @@ QImage Signature::preview(const QSize& box, qreal dpr) const {
   const QRectF target(QPointF((box.width() - drawn.width()) / 2, (box.height() - drawn.height()) / 2), drawn);
   if (kind == Kind::Image) {
     p.drawImage(target, image);
+  } else if (kind == Kind::Vector) {
+    art.paint(p, target);
   } else {
     QPainterPath path = outline();
     const QRectF b = path.boundingRect();
@@ -145,7 +193,12 @@ QString storePath() {
 }
 
 const char* kindKey(Signature::Kind k) {
-  return k == Signature::Kind::Drawn ? "drawn" : k == Signature::Kind::Typed ? "typed" : "image";
+  switch (k) {
+    case Signature::Kind::Drawn: return "drawn";
+    case Signature::Kind::Typed: return "typed";
+    case Signature::Kind::Vector: return "vector";
+    default: return "image";
+  }
 }
 
 }  // namespace
@@ -161,7 +214,10 @@ QList<Signature> SignatureStore::load() {
     s.id = o.value("id").toString();
     s.initials = o.value("initials").toBool();
     const QString kind = o.value("kind").toString();
-    s.kind = kind == "typed" ? Signature::Kind::Typed : kind == "image" ? Signature::Kind::Image : Signature::Kind::Drawn;
+    s.kind = kind == "typed"    ? Signature::Kind::Typed
+             : kind == "image"  ? Signature::Kind::Image
+             : kind == "vector" ? Signature::Kind::Vector
+                                : Signature::Kind::Drawn;
     s.color = QColor(o.value("color").toString("#000000"));
     s.penWidth = o.value("penWidth").toDouble(3);
     for (const QJsonValue& stroke : o.value("strokes").toArray()) {
@@ -172,6 +228,7 @@ QList<Signature> SignatureStore::load() {
     }
     s.text = o.value("text").toString();
     s.family = o.value("family").toString();
+    if (o.contains("shapes")) s.art = VectorArt::fromJson(o.value("shapes").toArray());
     if (o.contains("png")) s.image.loadFromData(QByteArray::fromBase64(o.value("png").toString().toLatin1()), "PNG");
     if (!s.isEmpty() && !s.id.isEmpty()) out << s;
   }
@@ -201,6 +258,8 @@ bool SignatureStore::save(const QList<Signature>& all) {
     } else if (s.kind == Signature::Kind::Typed) {
       o["text"] = s.text;
       o["family"] = s.family;
+    } else if (s.kind == Signature::Kind::Vector) {
+      o["shapes"] = s.art.toJson();
     } else {
       QByteArray png;
       QBuffer buf(&png);

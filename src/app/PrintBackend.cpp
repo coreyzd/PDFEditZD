@@ -12,18 +12,55 @@
 
 #include <cmath>
 
-int matchingPaper(const QList<PaperChoice>& papers, QSizeF page) {
+bool isCustomPaper(const PaperChoice& p) {
+  // DMPAPER_USER, or a driver's own custom size (PostScript drivers call theirs "PostScript
+  // Custom Page Size"; plotters "Custom", "User Defined"...).
+  if (p.id == 256) return true;
+  const QString n = p.name.toLower();
+  return n.contains(QLatin1String("custom")) || n.contains(QLatin1String("user defined")) ||
+         n.contains(QLatin1String("user-defined"));
+}
+
+PaperPick paperForSize(const QList<PaperChoice>& papers, QSizeF page) {
   const double w = std::min(page.width(), page.height()), h = std::max(page.width(), page.height());
-  int best = -1;
-  double bestErr = 6;  // points: about 2 mm, for sizes rounded to millimeters or inches
+  const double slack = 6;  // points: about 2 mm, for sizes rounded to millimeters or inches
+  const PaperChoice* exact = nullptr;
+  const PaperChoice* fits = nullptr;
+  const PaperChoice* custom = nullptr;
+  const PaperChoice* largest = nullptr;
+  double bestErr = slack, bestArea = 0, largestArea = 0;
   for (const PaperChoice& p : papers) {
+    if (p.size.isEmpty()) continue;
+    if (isCustomPaper(p)) {
+      if (!custom) custom = &p;
+      continue;
+    }
     const double err = std::max(std::abs(p.size.width() - w), std::abs(p.size.height() - h));
     if (err < bestErr) {
       bestErr = err;
-      best = p.id;
+      exact = &p;
+    }
+    const double area = p.size.width() * p.size.height();
+    if (p.size.width() + slack >= w && p.size.height() + slack >= h && (!fits || area < bestArea)) {
+      fits = &p;
+      bestArea = area;
+    }
+    if (!largest || area > largestArea) {
+      largest = &p;
+      largestArea = area;
     }
   }
-  return best;
+  if (exact) return {exact->id, {}};
+  if (fits) return {fits->id, {}};
+  if (custom) return {custom->id, QSizeF(w, h)};
+  if (largest) return {largest->id, {}};
+  return {-1, {}};
+}
+
+QString paperDescription(const QList<PaperChoice>& papers, const PaperPick& pick) {
+  for (const PaperChoice& p : papers)
+    if (p.id == pick.id) return pick.customSize.isEmpty() ? p.name : QObject::tr("%1, made the page's size").arg(p.name);
+  return {};
 }
 
 namespace {
@@ -66,16 +103,16 @@ public:
   bool showProperties(QWidget* parent) override {
     return printer_ && printer_->showProperties(parent ? reinterpret_cast<void*>(parent->window()->winId()) : nullptr);
   }
-  SheetGeometry geometry(int paper, int source) override {
+  SheetGeometry geometry(const PaperPick& paper, int source) override {
     if (!printer_) return {};
-    return convert(printer_->geometry(short(paper), short(source == kAutoSource ? 7 : source)));
+    return convert(printer_->geometry(request(paper), short(source == kAutoSource ? 7 : source)));
   }
   bool begin(const QString& docName, int copies, bool color, bool duplex) override {
     return printer_ && printer_->begin(docName.toStdWString(), copies, color, duplex);
   }
   bool copiesDone() const override { return printer_ && printer_->copiesDone(); }
-  bool startPage(int paper, int source) override {
-    return printer_ && printer_->startPage(short(paper), short(source == kAutoSource ? 7 : source));
+  bool startPage(const PaperPick& paper, int source) override {
+    return printer_ && printer_->startPage(request(paper), short(source == kAutoSource ? 7 : source));
   }
   SheetGeometry pageGeometry() const override { return printer_ ? convert(printer_->pageGeometry()) : SheetGeometry{}; }
   bool drawImage(const QImage& image, QPoint pos) override {
@@ -89,6 +126,16 @@ public:
   }
 
 private:
+  winprint::PaperRequest request(const PaperPick& pick) const {
+    winprint::PaperRequest r;
+    r.id = short(pick.id);
+    r.widthPt = pick.customSize.width();
+    r.heightPt = pick.customSize.height();
+    if (printer_ && pick.customSize.isEmpty())
+      for (const auto& p : printer_->papers())
+        if (p.id == r.id) r.form = p.name;
+    return r;
+  }
   static SheetGeometry convert(const winprint::Geometry& g) {
     SheetGeometry s;
     s.paper = QSizeF(g.paperW, g.paperH);
@@ -126,11 +173,11 @@ public:
   QList<SourceChoice> sources() const override { return {}; }
   int currentPaper() const override { return printer_ ? int(printer_->pageLayout().pageSize().id()) : 0; }
   bool canDuplex() const override { return !info_.supportedDuplexModes().isEmpty() && info_.supportedDuplexModes().size() > 1; }
-  SheetGeometry geometry(int paper, int) override {
+  SheetGeometry geometry(const PaperPick& paper, int) override {
     if (!printer_) return {};
     QPageLayout layout = printer_->pageLayout();
     layout.setOrientation(QPageLayout::Portrait);
-    layout.setPageSize(QPageSize(QPageSize::PageSizeId(paper)));
+    layout.setPageSize(pageSize(paper));
     return sheet(layout);
   }
   bool begin(const QString& docName, int copies, bool color, bool duplex) override {
@@ -143,10 +190,10 @@ public:
     return true;
   }
   bool copiesDone() const override { return printer_ && printer_->supportsMultipleCopies(); }
-  bool startPage(int paper, int source) override {
+  bool startPage(const PaperPick& paper, int source) override {
     QPageLayout layout = printer_->pageLayout();
     layout.setOrientation(QPageLayout::Portrait);
-    if (paper > 0) layout.setPageSize(QPageSize(QPageSize::PageSizeId(paper)));
+    if (paper.id > 0 || !paper.customSize.isEmpty()) layout.setPageSize(pageSize(paper));
     if (source != kAutoSource) printer_->setPaperSource(QPrinter::PaperSource(source));
     if (!started_) {
       printer_->setPageLayout(layout);
@@ -173,6 +220,10 @@ public:
   }
 
 private:
+  static QPageSize pageSize(const PaperPick& p) {
+    if (!p.customSize.isEmpty()) return QPageSize(p.customSize, QPageSize::Point, QString(), QPageSize::ExactMatch);
+    return QPageSize(QPageSize::PageSizeId(p.id));
+  }
   SheetGeometry sheet(const QPageLayout& layout) const {
     SheetGeometry g;
     g.paper = layout.fullRect(QPageLayout::Point).size();

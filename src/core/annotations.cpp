@@ -837,7 +837,7 @@ int Document::addStamp(int pageIndex, const Annotation& a, const StampDrawing& d
       }
     }
     FPDFPageObj_SetFillColor(obj, path.color.r, path.color.g, path.color.b, 255);
-    FPDFPath_SetDrawMode(obj, FPDF_FILLMODE_WINDING, 0);
+    FPDFPath_SetDrawMode(obj, path.evenOdd ? FPDF_FILLMODE_ALTERNATE : FPDF_FILLMODE_WINDING, 0);
     if (!FPDFAnnot_AppendObject(h.a, obj)) {
       FPDFPageObj_Destroy(obj);
       ok = false;

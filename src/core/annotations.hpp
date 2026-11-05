@@ -88,8 +88,9 @@ struct StampDrawing {
     PointF p[3];  // MoveTo/LineTo: p[0]; CubicTo: the two control points, then the end
   };
   struct Path {
-    std::vector<Op> ops;  // filled with the nonzero winding rule
+    std::vector<Op> ops;  // filled with the nonzero winding rule, or even-odd
     Color color{0, 0, 0};
+    bool evenOdd = false;
   };
   double width = 1, height = 1;
   std::vector<Path> paths;

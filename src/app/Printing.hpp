@@ -45,7 +45,7 @@ struct Placement {
 Placement placePage(QSizeF pagePt, const SheetGeometry& sheet, const PrintOptions& options);
 
 // The paper and tray a page prints on.
-int paperForPage(QSizeF pagePt, const QList<PaperChoice>& papers, const PrintOptions& options, int printersPaper);
+PaperPick paperForPage(QSizeF pagePt, const QList<PaperChoice>& papers, const PrintOptions& options, int printersPaper);
 int sourceForPage(const PrintOptions& options);
 
 // Shows the print dialog and prints. Returns false if canceled or printing failed.

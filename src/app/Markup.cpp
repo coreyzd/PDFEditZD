@@ -284,6 +284,7 @@ pdfz::StampDrawing::Path stampPath(const QPainterPath& path, const QColor& color
   using Op = pdfz::StampDrawing::Op;
   pdfz::StampDrawing::Path out;
   out.color = fromQColor(color);
+  out.evenOdd = path.fillRule() == Qt::OddEvenFill;
   for (int i = 0; i < path.elementCount(); ++i) {
     const QPainterPath::Element e = path.elementAt(i);
     Op op;

@@ -112,6 +112,24 @@ struct Affine {
   }
 };
 
+// A drawn shape of a page, for using the drawing elsewhere (a stamp or a signature from a
+// PDF): its outline in the display frame, and how it's painted. Text comes as the outlines of
+// its letters.
+struct PageShape {
+  std::vector<StampDrawing::Op> ops;
+  bool fill = false;
+  bool evenOdd = false;
+  Color fillColor{0, 0, 0};
+  bool stroke = false;
+  Color strokeColor{0, 0, 0};
+  double strokeWidth = 1;   // display points
+  int lineCap = 0;          // 0 butt, 1 round, 2 square
+  int lineJoin = 0;         // 0 miter, 1 round, 2 bevel
+};
+
+// Draw order: to the top or bottom of everything, or one step past what overlaps it.
+enum class Arrange { ToFront, ToBack, Forward, Backward };
+
 // Whether a standard font can show this text (the Windows-1252 characters).
 bool standardFontCanShow(const std::string& utf8);
 

@@ -75,12 +75,12 @@ Placement placePage(QSizeF page, const SheetGeometry& sheet, const PrintOptions&
   return out;
 }
 
-int paperForPage(QSizeF page, const QList<PaperChoice>& papers, const PrintOptions& o, int printersPaper) {
+PaperPick paperForPage(QSizeF page, const QList<PaperChoice>& papers, const PrintOptions& o, int printersPaper) {
   if (o.paperByPageSize) {
-    const int match = matchingPaper(papers, page);
-    if (match >= 0) return match;
+    const PaperPick pick = paperForSize(papers, page);
+    if (pick.id >= 0) return pick;
   }
-  return o.paper > 0 ? o.paper : printersPaper;
+  return {o.paper > 0 ? o.paper : printersPaper, {}};
 }
 
 int sourceForPage(const PrintOptions& o) { return o.paperByPageSize ? kAutoSource : o.source; }
@@ -106,7 +106,12 @@ bool printPages(PrintBackend& printer, const pdfz::Document& doc, const QString&
       }
       const pdfz::SizeF s = doc.pageSize(i);
       const QSizeF page(s.width, s.height);
-      if (!printer.startPage(paperForPage(page, papers, o, printersPaper), sourceForPage(o))) {
+      const PaperPick pick = paperForPage(page, papers, o, printersPaper);
+      qInfo("Printing page %d (%.1f x %.1f in) on paper %d (%s)%s", i + 1, s.width / 72, s.height / 72, pick.id,
+            qUtf8Printable(paperDescription(papers, pick)),
+            pick.customSize.isEmpty() ? ""
+                                      : qUtf8Printable(QStringLiteral(", %1 x %2 in").arg(pick.customSize.width() / 72).arg(pick.customSize.height() / 72)));
+      if (!printer.startPage(pick, sourceForPage(o))) {
         printer.abort();
         return false;
       }
@@ -459,6 +464,18 @@ void PrintDialog::printerChanged() {
   const QString name = printers_->currentText();
   const bool ok = !name.isEmpty() && printer_.select(name);
   papers_ = ok ? printer_.papers() : QList<PaperChoice>{};
+  // Its papers in the log, for when the paper chosen for a page isn't the one expected.
+  if (ok) {
+    QString list;
+    for (const PaperChoice& p : papers_)
+      list += QStringLiteral("\n  %1: %2 (%3 x %4 in)%5")
+                  .arg(p.id)
+                  .arg(p.name)
+                  .arg(p.size.width() / 72, 0, 'f', 2)
+                  .arg(p.size.height() / 72, 0, 'f', 2)
+                  .arg(isCustomPaper(p) ? QStringLiteral(", custom size") : QString());
+    qInfo("Printer %s, paper now %d, papers:%s", qUtf8Printable(name), printer_.currentPaper(), qUtf8Printable(list));
+  }
   QSettings st;
   paper_ = st.value("print/paper/" + name, 0).toInt();
   source_ = st.value("print/source/" + name, kAutoSource).toInt();
@@ -534,7 +551,7 @@ void PrintDialog::updatePreview() {
   const PrintOptions o = options();
   const pdfz::SizeF s = doc_.pageSize(page);
   const QSizeF pageSize(s.width, s.height);
-  const int paper = paperForPage(pageSize, papers_, o, printer_.currentPaper());
+  const PaperPick paper = paperForPage(pageSize, papers_, o, printer_.currentPaper());
   const SheetGeometry sheet = printer_.geometry(paper, sourceForPage(o));
   const Placement pl = placePage(pageSize, sheet, o);
 
@@ -551,9 +568,7 @@ void PrintDialog::updatePreview() {
   preview_->show(img, sheet, pl);  // a turned sheet is shown turned, so the page reads upright
   scaleLabel_->setText(tr("Scale: %1%").arg(std::lround(pl.scale * 100)));
   // The sheet the way the page reads on it.
-  QString paperName;
-  for (const PaperChoice& p : papers_)
-    if (p.id == paper) paperName = p.name;
+  const QString paperName = paperDescription(papers_, paper);
   const QSizeF shown = pl.turn ? sheet.paper.transposed() : sheet.paper;
   sizeLabel_->setText(tr("%1 x %2 Inches").arg(inches(shown.width()), inches(shown.height())) +
                       (paperName.isEmpty() ? QString() : QStringLiteral("  (%1)").arg(paperName)));

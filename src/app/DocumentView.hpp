@@ -124,6 +124,13 @@ public:
   // The blocks with any of these objects (after they moved or turned).
   void selectContentObjects(int page, const std::vector<int>& objects);
   void clearContentSelection();
+  // The selection's page and objects (all of its blocks').
+  int contentSelectionPage() const { return contentPage_; }
+  std::vector<int> contentSelectionObjects() const;
+  // Text of the selected text blocks, in order (for copying).
+  QString contentSelectionText() const;
+  void selectAllContent(int page);
+  void deleteContentSelection();
   // The selection moved, turned or flipped by `m` (about its middle: see selectionCenter()).
   void transformContentSelection(const pdfz::Affine& m, const QString& label);
   pdfz::PointF contentSelectionCenter() const;
@@ -267,7 +274,6 @@ private:
   int contentHandleUnder(QPointF viewportPos) const;
   bool contentHandlesShown() const;
   pdfz::RectF contentSelectionRect() const;
-  std::vector<int> contentSelectionObjects() const;
   pdfz::Affine contentDragAffine() const;  // what the drag does to the selection
   QPolygonF contentOutline(int page, const pdfz::RectF& r, const pdfz::Affine& m) const;  // viewport
   void editPress(QMouseEvent* e);

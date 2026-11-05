@@ -13,6 +13,7 @@
 #include <winspool.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 
 namespace winprint {
@@ -145,13 +146,24 @@ bool Printer::showProperties(void* parent) {
 
 namespace {
 
-DevMode withPaper(const DevMode& base, short paper, short bin) {
+DevMode withPaper(const DevMode& base, const PaperRequest& paper, short bin) {
   DevMode d = base;
   DEVMODEW* m = dm(d);
-  if (paper > 0) {
+  if (paper.id > 0) {
     m->dmFields |= DM_PAPERSIZE;
     m->dmFields &= ~DWORD(DM_PAPERLENGTH | DM_PAPERWIDTH | DM_FORMNAME);
-    m->dmPaperSize = paper;
+    m->dmPaperSize = paper.id;
+    if (paper.widthPt > 0 && paper.heightPt > 0) {
+      // A size of its own, in tenths of a millimeter.
+      m->dmFields |= DM_PAPERWIDTH | DM_PAPERLENGTH;
+      m->dmPaperWidth = short(std::lround(paper.widthPt / 72 * 254));
+      m->dmPaperLength = short(std::lround(paper.heightPt / 72 * 254));
+    } else if (!paper.form.empty() && paper.form.size() < CCHFORMNAME) {
+      // The form's name too: PostScript and plotter drivers go by it.
+      m->dmFields |= DM_FORMNAME;
+      std::fill(std::begin(m->dmFormName), std::end(m->dmFormName), L'\0');
+      std::copy(paper.form.begin(), paper.form.end(), m->dmFormName);
+    }
   }
   m->dmFields |= DM_DEFAULTSOURCE | DM_ORIENTATION;
   m->dmDefaultSource = bin > 0 ? bin : short(DMBIN_AUTO);
@@ -176,7 +188,7 @@ Geometry geometryOf(HDC dc) {
 
 }  // namespace
 
-Geometry Printer::geometry(short paper, short bin) {
+Geometry Printer::geometry(const PaperRequest& paper, short bin) {
   Geometry g;
   if (d_->settings.empty()) return g;
   DevMode d = withPaper(d_->settings, paper, bin);
@@ -206,7 +218,7 @@ bool Printer::begin(const std::wstring& docName, int copies, bool color, bool du
     m->dmFields |= DM_DUPLEX;
     m->dmDuplex = duplex ? DMDUP_VERTICAL : DMDUP_SIMPLEX;
   }
-  d_->current = withPaper(d_->settings, m->dmPaperSize, m->dmDefaultSource);
+  d_->current = withPaper(d_->settings, PaperRequest{m->dmPaperSize, {}, 0, 0}, m->dmDefaultSource);
   d_->dc = CreateDCW(L"WINSPOOL", name_.c_str(), nullptr, dm(d_->current));
   if (!d_->dc) return false;
   DOCINFOW info{};
@@ -220,7 +232,7 @@ bool Printer::begin(const std::wstring& docName, int copies, bool color, bool du
   return true;
 }
 
-bool Printer::startPage(short paper, short bin) {
+bool Printer::startPage(const PaperRequest& paper, short bin) {
   if (!d_->dc) return false;
   // A new paper size or tray: the DC is set up again between pages (ResetDC), as the API
   // allows, so one job can mix sizes and trays.

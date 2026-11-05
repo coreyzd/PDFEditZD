@@ -13,6 +13,7 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <QPainterPathStroker>
+#include <QSettings>
 #include <QStandardPaths>
 #include <QUuid>
 
@@ -130,6 +131,17 @@ MadeStamp makeImageStamp(const QImage& image) {
   return out;
 }
 
+MadeStamp makeVectorStamp(const VectorArt& art) {
+  MadeStamp out;
+  out.drawing = art.drawing();
+  const double w = out.drawing.width, h = out.drawing.height;
+  const double k = 108 / std::max(w, h);  // an inch and a half across, the longer way
+  out.width = w * k;
+  out.height = h * k;
+  out.preview = art.preview(QSize(160, std::max(16, int(std::lround(160 * h / w)))), 2);
+  return out;
+}
+
 namespace {
 QString stampDir() {
   const QString dir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + QStringLiteral("/stamps");
@@ -138,12 +150,20 @@ QString stampDir() {
 }
 }  // namespace
 
+QString CustomStamps::Entry::key() const { return QStringLiteral("custom:") + QFileInfo(path).fileName(); }
+
+MadeStamp CustomStamps::Entry::made() const { return art.isEmpty() ? makeImageStamp(image) : makeVectorStamp(art); }
+
 QList<CustomStamps::Entry> CustomStamps::load() {
   QList<Entry> out;
   const QDir dir(stampDir());
-  for (const QFileInfo& fi : dir.entryInfoList({QStringLiteral("*.png")}, QDir::Files, QDir::Time | QDir::Reversed)) {
-    QImage img(fi.absoluteFilePath());
-    if (!img.isNull()) out.push_back({fi.absoluteFilePath(), img});
+  for (const QFileInfo& fi : dir.entryInfoList({QStringLiteral("*.png"), QStringLiteral("*.svg")}, QDir::Files,
+                                               QDir::Time | QDir::Reversed)) {
+    Entry e;
+    e.path = fi.absoluteFilePath();
+    if (fi.suffix().compare(QLatin1String("svg"), Qt::CaseInsensitive) == 0) e.art = readVectorFile(e.path, nullptr);
+    else e.image = QImage(e.path);
+    if (!e.image.isNull() || !e.art.isEmpty()) out.push_back(e);
   }
   return out;
 }
@@ -154,6 +174,36 @@ bool CustomStamps::add(const QImage& image) {
   return img.save(stampDir() + "/" + QUuid::createUuid().toString(QUuid::WithoutBraces) + ".png", "PNG");
 }
 
+bool CustomStamps::add(const VectorArt& art) {
+  if (art.isEmpty()) return false;
+  const QRectF b = art.bounds();
+  QFile f(stampDir() + "/" + QUuid::createUuid().toString(QUuid::WithoutBraces) + ".svg");
+  if (!f.open(QIODevice::WriteOnly)) return false;
+  return f.write(art.toSvg(b.size())) > 0;
+}
+
 void CustomStamps::remove(const QString& path) {
-  if (QFileInfo(path).absolutePath() == QFileInfo(stampDir()).absoluteFilePath()) QFile::remove(path);
+  if (QFileInfo(path).absolutePath() == QFileInfo(stampDir()).absoluteFilePath()) {
+    StampFavorites::set(QStringLiteral("custom:") + QFileInfo(path).fileName(), false);
+    QFile::remove(path);
+  }
+}
+
+QString StampFavorites::standardKey(const StampStyle& style) { return QStringLiteral("std:") + style.title; }
+
+QStringList StampFavorites::load() {
+  const QSettings s;
+  if (!s.contains("stamps/favorites"))
+    return {QStringLiteral("std:APPROVED"), QStringLiteral("std:REVIEWED"), QStringLiteral("std:DRAFT"),
+            QStringLiteral("std:CONFIDENTIAL")};
+  return s.value("stamps/favorites").toStringList();
+}
+
+bool StampFavorites::contains(const QString& key) { return load().contains(key); }
+
+void StampFavorites::set(const QString& key, bool favorite) {
+  QStringList all = load();
+  if (favorite && !all.contains(key)) all << key;
+  if (!favorite) all.removeAll(key);
+  QSettings().setValue("stamps/favorites", all);
 }

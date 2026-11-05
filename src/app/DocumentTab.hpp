@@ -83,6 +83,15 @@ public:
   // Edit PDF: a picture added to the page's content, filling `rect` (display frame); it's then
   // selected.
   void addContentImage(int page, const pdfz::Document::PageImage& image, const pdfz::RectF& rect);
+  // The selected content to the clipboard (as a PDF of its own, which pastes in the same place
+  // in any document, and as a picture and text for other programs); cutting deletes it too.
+  void copyContent(bool cut);
+  // The clipboard's content (copied here) or picture onto `page`, then selected. False if
+  // there's nothing to paste.
+  bool pasteContent(int page);
+  static bool canPaste();
+  // The selection's draw order.
+  void arrangeContent(pdfz::Arrange how);
   // A block of the page's text written again in another font, size or color.
   void restyleContent(int page, const pdfz::ContentBlock& block, const TextStyleChange& change);
 

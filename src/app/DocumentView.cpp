@@ -1000,6 +1000,27 @@ void DocumentView::setMarkupTool(MarkupTool tool, const MarkupStyle& style) {
 
 void DocumentView::contextMenuEvent(QContextMenuEvent* e) {
   int page = currentPage_, listPos = -1, index = -1;
+  if (tool_ == Tool::Edit) {
+    // What's under the mouse is what the menu is for: selected, unless it already is.
+    commitContentEdit();
+    if (contentUnder(e->pos(), page, listPos)) {
+      const pdfz::ContentBlock& b = (*content_->get(page))[std::size_t(listPos)];
+      const bool selected = page == contentPage_ && std::any_of(contentSel_.begin(), contentSel_.end(), [&](const pdfz::ContentBlock& s) {
+                              return s.objects == b.objects;
+                            });
+      if (!selected) {
+        contentPage_ = page;
+        contentSel_ = {b};
+        viewport()->update();
+        emit contentSelectionChanged();
+      }
+    } else {
+      QPointF pt;
+      if (!pagePointAt(e->pos(), page, pt, true)) page = currentPage_;
+    }
+    emit contextMenuRequested(e->globalPos(), page, -1);
+    return;
+  }
   if (annotationUnder(e->pos(), page, listPos)) {
     index = (*annots_->get(page))[std::size_t(listPos)].index;
     selectAnnotation(page, index, false);
@@ -1454,6 +1475,33 @@ void DocumentView::clearContentSelection() {
   contentSel_.clear();
   viewport()->update();
   emit contentSelectionChanged();
+}
+
+QString DocumentView::contentSelectionText() const {
+  QStringList parts;
+  for (const pdfz::ContentBlock& b : contentSel_)
+    if (b.kind == pdfz::ContentBlock::Kind::Text && !b.text.empty()) parts << QString::fromStdString(b.text);
+  return parts.join(QLatin1Char('\n'));
+}
+
+void DocumentView::selectAllContent(int page) {
+  const auto list = content_->get(page);
+  if (list->empty()) {
+    clearContentSelection();
+    return;
+  }
+  contentPage_ = page;
+  contentSel_ = *list;
+  viewport()->update();
+  emit contentSelectionChanged();
+}
+
+void DocumentView::deleteContentSelection() {
+  if (contentPage_ < 0) return;
+  const int page = contentPage_;
+  const std::vector<int> objs = contentSelectionObjects();
+  clearContentSelection();
+  emit contentDeleteRequested(page, objs);
 }
 
 pdfz::RectF DocumentView::contentSelectionRect() const {

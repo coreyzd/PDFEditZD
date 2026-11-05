@@ -21,6 +21,14 @@ struct PaperChoice {
   QSizeF size;  // points, portrait
 };
 
+// The paper a page goes on: one of the printer's, and for a custom-size one (a plotter's roll),
+// the size to make it.
+struct PaperPick {
+  int id = 0;
+  QSizeF customSize;  // points, portrait; empty: the paper's own size
+  bool operator==(const PaperPick&) const = default;
+};
+
 struct SourceChoice {
   int id = 0;  // kAutoSource: the printer picks (by the paper size)
   QString name;
@@ -52,13 +60,13 @@ public:
   virtual bool hasProperties() const { return false; }
   virtual bool showProperties(QWidget*) { return false; }
 
-  virtual SheetGeometry geometry(int paper, int source) = 0;
+  virtual SheetGeometry geometry(const PaperPick& paper, int source) = 0;
 
   // The job. drawImage() places a picture 1:1 at device pixel `pos` from the printable area's
   // top-left of the page started last.
   virtual bool begin(const QString& docName, int copies, bool color, bool duplex) = 0;
   virtual bool copiesDone() const = 0;  // the printer makes the copies itself
-  virtual bool startPage(int paper, int source) = 0;
+  virtual bool startPage(const PaperPick& paper, int source) = 0;
   virtual SheetGeometry pageGeometry() const = 0;
   virtual bool drawImage(const QImage& image, QPoint pos) = 0;
   virtual bool endPage() = 0;
@@ -66,5 +74,12 @@ public:
   virtual void abort() = 0;
 };
 
-// The printer's paper closest to `pagePt` (either way round), within a few points; -1 if none.
-int matchingPaper(const QList<PaperChoice>& papers, QSizeF pagePt);
+// Whether a paper is the driver's custom size ("PostScript Custom Page Size", a roll), whose
+// listed size is only its largest.
+bool isCustomPaper(const PaperChoice& paper);
+// The paper for a page `pagePt` big (either way round): the printer's paper of that size (within
+// a few points); else the smallest one it fits on; else the custom size, made the page's size;
+// else the largest. An id of -1 if the printer lists no paper.
+PaperPick paperForSize(const QList<PaperChoice>& papers, QSizeF pagePt);
+// "34 x 22" and the paper's name, for showing.
+QString paperDescription(const QList<PaperChoice>& papers, const PaperPick& pick);

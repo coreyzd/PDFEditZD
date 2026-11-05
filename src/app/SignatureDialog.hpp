@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Making a signature (or initials): draw it with the mouse or a pen, type it in a handwriting
-// font, or use a picture of it.
+// font, or import it: a drawing of it (SVG or PDF, kept sharp) or a picture of it.
 #pragma once
 
 #include "Signatures.hpp"
@@ -39,6 +39,8 @@ private:
   QSlider* threshold_;
   QImage sourceImage_;
   QImage cleanImage_;
+  VectorArt vector_;       // an imported drawing (else the picture is used)
+  QWidget* thresholdRow_;
   QButtonGroup* colors_;
   QCheckBox* save_;
   QPushButton* ok_;

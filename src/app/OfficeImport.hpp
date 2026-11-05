@@ -5,6 +5,7 @@
 
 #include "core/document.hpp"
 
+#include <QImage>
 #include <QString>
 #include <QStringList>
 
@@ -24,3 +25,5 @@ QString convertToPdf(QWidget* parent, const QString& path, QString* error);
 // A picture as a page's image: JPEG files are kept as they are (unless they need turning
 // upright), anything else as pixels, scaled down if very large. False if it can't be read.
 bool loadPageImage(const QString& path, pdfz::Document::PageImage& out, QString* error);
+// A picture (from the clipboard, say) as a page's image: on white, scaled down if very large.
+pdfz::Document::PageImage pageImageFrom(QImage image);

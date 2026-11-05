@@ -313,3 +313,110 @@ TEST_CASE("shapes are graphics blocks; content split across streams survives an 
   CHECK(ink(*again, {150, 38, 185, 52}) > 50);    // the text, moved
   CHECK(ink(*again, {50, 38, 80, 52}) == 0);      // and not where it was
 }
+
+TEST_CASE("draw order: to the front, to the back, one step") {
+  auto doc = page();
+  // Three overlapping squares, black, gray, black: a picture each, so they're easy to find.
+  auto square = [&](std::uint8_t shade, double x) {
+    Document::PageImage img;
+    img.width = img.height = 4;
+    img.bgra.assign(4 * 4 * 4, shade);
+    for (std::size_t i = 3; i < img.bgra.size(); i += 4) img.bgra[i] = 255;
+    REQUIRE(doc->addContentImage(0, img, {x, 50, x + 100, 150}));
+  };
+  square(0, 50);     // object 0
+  square(128, 70);   // object 1
+  square(255, 90);   // object 2: white, on top
+  // Where all three overlap (90..150), the top one shows: white.
+  auto top = [&] {
+    const auto bmp = doc->render(0, 1.0, {0, 0, 400, 300});
+    return bmp.pixel(120, 100) & 0xFF;
+  };
+  CHECK(top() > 200);
+  // [black, gray, white]: the white one to the back, then the gray one.
+  auto now = doc->arrangeContent(0, {2}, pdfz::Arrange::ToBack);
+  REQUIRE(now == std::vector<int>{0});  // [white, black, gray]
+  CHECK(top() > 100);
+  CHECK(top() < 200);
+  now = doc->arrangeContent(0, {2}, pdfz::Arrange::ToBack);
+  REQUIRE(now == std::vector<int>{0});  // [gray, white, black]
+  CHECK(top() < 50);
+  now = doc->arrangeContent(0, {0}, pdfz::Arrange::Forward);  // one step: over the white one only
+  REQUIRE(now == std::vector<int>{1});  // [white, gray, black]
+  CHECK(top() < 50);
+  now = doc->arrangeContent(0, {1}, pdfz::Arrange::ToFront);
+  REQUIRE(now == std::vector<int>{2});  // [white, black, gray]
+  CHECK(top() > 100);
+  CHECK(top() < 200);
+  now = doc->arrangeContent(0, {2}, pdfz::Arrange::Backward);
+  REQUIRE(now == std::vector<int>{1});  // [white, gray, black]
+  CHECK(top() < 50);
+  // Saved, the order holds.
+  auto saved = reopen(*doc);
+  const auto bmp = saved->render(0, 1.0, {0, 0, 400, 300});
+  CHECK((bmp.pixel(120, 100) & 0xFF) < 50);
+}
+
+TEST_CASE("copying and pasting between documents, in the same place") {
+  auto src = page(400, 300);
+  REQUIRE(src->replaceText(0, {}, lines({"Copy me"}, 200, 100, 20)));
+  REQUIRE(src->replaceText(0, {}, lines({"Leave me"}, 20, 250, 20)));
+  const auto srcBlocks = src->contentBlocks(0);
+  const ContentBlock* copy = textBlock(srcBlocks, "Copy");
+  REQUIRE(copy);
+  const auto copied = src->copyContent(0, copy->objects);
+  REQUIRE(copied);
+
+  // Into another document's page (bigger, and turned a quarter): the same place from the
+  // top-left of the page as shown.
+  auto dst = Document::create();
+  REQUIRE(dst->insertBlankPage(0, {612, 792}));
+  REQUIRE(dst->setPageRotation(0, 90));
+  const auto pasted = dst->pasteContent(0, copied);
+  REQUIRE(pasted.size() == 1);
+  auto blocks = reopen(*dst)->contentBlocks(0);
+  REQUIRE(blocks.size() == 1);
+  CHECK(blocks[0].text == "Copy me");
+  CHECK(blocks[0].rect.left == doctest::Approx(copy->rect.left).epsilon(0.02));
+  CHECK(blocks[0].rect.top == doctest::Approx(copy->rect.top).epsilon(0.02));
+  CHECK(!textBlock(blocks, "Leave"));
+
+  // Onto a page too small for where it was: in the middle instead.
+  auto small = Document::create();
+  REQUIRE(small->insertBlankPage(0, {150, 100}));
+  REQUIRE(small->pasteContent(0, copied).size() == 1);
+  blocks = small->contentBlocks(0);
+  REQUIRE(blocks.size() == 1);
+  CHECK(blocks[0].rect.left > 0);
+  CHECK(blocks[0].rect.right < 150);
+}
+
+TEST_CASE("a page's drawing as shapes: paths and the outlines of text") {
+  auto doc = splitStreams();
+  int pictures = -1;
+  const auto shapes = doc->pageShapes(0, &pictures);
+  CHECK(pictures == 0);
+  REQUIRE(shapes.size() == 2);  // the triangle, and "Hello"
+  CHECK(shapes[0].fill);
+  CHECK(!shapes[0].stroke);
+  // The triangle, drawn at half size: from (10, 10) up to (60, 60) in PDF space.
+  double minX = 1e9, maxX = -1e9;
+  for (const auto& op : shapes[0].ops)
+    if (op.kind != pdfz::StampDrawing::Op::Close) {
+      minX = std::min(minX, op.p[0].x);
+      maxX = std::max(maxX, op.p[0].x);
+    }
+  CHECK(minX == doctest::Approx(10));
+  CHECK(maxX == doctest::Approx(60));
+  // The text's letters: many curves, about where "Hello" is (x 50 to about 80).
+  CHECK(shapes[1].ops.size() > 20);
+  double tx0 = 1e9, tx1 = -1e9;
+  for (const auto& op : shapes[1].ops)
+    if (op.kind != pdfz::StampDrawing::Op::Close) {
+      tx0 = std::min(tx0, op.p[0].x);
+      tx1 = std::max(tx1, op.p[0].x);
+    }
+  CHECK(tx0 == doctest::Approx(50).epsilon(0.05));
+  CHECK(tx1 > 70);
+  CHECK(tx1 < 90);
+}

@@ -4,6 +4,8 @@
 #include "CommentDialog.hpp"
 #include "CommentsPanel.hpp"
 #include "DocumentView.hpp"
+#include "ImageUtil.hpp"
+#include "OfficeImport.hpp"
 #include "PageRenderer.hpp"
 #include "ThumbnailPanel.hpp"
 
@@ -11,6 +13,8 @@
 #include "core/document.hpp"
 
 #include <QApplication>
+#include <QClipboard>
+#include <QMimeData>
 #include <QDir>
 #include <QFileInfo>
 #include <QMessageBox>
@@ -622,4 +626,118 @@ void DocumentTab::onContentEditFinished(TextEditing e, RichText text) {
   history_.push(std::move(before), (empty ? tr("Delete Text") : tr("Edit Text")).toStdString());
   refresh(Scope::Content, page, page);
   if (!empty) view_->selectContentAt(page, selectAt);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Copy, paste and draw order
+
+namespace {
+const char* const kContentMime = "application/x-pdfeditzd-content";
+}  // namespace
+
+void DocumentTab::copyContent(bool cut) {
+  if (!doc_) return;
+  const int page = view_->contentSelectionPage();
+  const std::vector<int> objects = view_->contentSelectionObjects();
+  if (page < 0 || objects.empty()) return;
+  QApplication::setOverrideCursor(Qt::WaitCursor);
+  const pdfz::Bytes copied = doc_->copyContent(page, objects);
+  auto* mime = new QMimeData;
+  if (copied) {
+    mime->setData(kContentMime, QByteArray(reinterpret_cast<const char*>(copied->data()), qsizetype(copied->size())));
+    // A picture of it for other programs (at 200 DPI), cut to what was copied.
+    auto [clip, err] = pdfz::Document::openBytes(copied);
+    if (clip) {
+      pdfz::RectF r;
+      for (const pdfz::ContentBlock& b : clip->contentBlocks(0)) r = r.united(b.rect);
+      const double scale = 200.0 / 72;
+      if (!r.empty() && r.width() * scale < 8000 && r.height() * scale < 8000) {
+        const pdfz::PixelRect px{int(std::floor(r.left * scale)), int(std::floor(r.top * scale)),
+                                 std::max(1, int(std::ceil(r.width() * scale))), std::max(1, int(std::ceil(r.height() * scale)))};
+        mime->setImageData(toQImage(clip->render(0, scale, px, pdfz::RenderForPrinting)).copy());
+      }
+    }
+  }
+  const QString text = view_->contentSelectionText();
+  if (!text.isEmpty()) mime->setText(text);
+  QApplication::restoreOverrideCursor();
+  if (mime->formats().isEmpty()) {
+    delete mime;
+    emit statusMessage(tr("That couldn't be copied."), 3000);
+    return;
+  }
+  QGuiApplication::clipboard()->setMimeData(mime);
+  if (!cut) {
+    emit statusMessage(tr("Copied"), 2000);
+    return;
+  }
+  view_->clearContentSelection();
+  if (applyEdit(tr("Cut"), page, Scope::Content, [&](pdfz::Document& d) { return d.deleteContent(page, objects); }))
+    emit statusMessage(tr("Cut (Ctrl+V pastes it)"), 3000);
+}
+
+bool DocumentTab::canPaste() {
+  const QMimeData* m = QGuiApplication::clipboard()->mimeData();
+  return m && (m->hasFormat(kContentMime) || m->hasImage());
+}
+
+bool DocumentTab::pasteContent(int page) {
+  if (!doc_ || page < 0 || page >= doc_->pageCount()) return false;
+  finishTextEditing();
+  const QMimeData* m = QGuiApplication::clipboard()->mimeData();
+  if (!m) return false;
+  if (m->hasFormat(kContentMime)) {
+    const QByteArray copied = m->data(kContentMime);
+    auto bytes = std::make_shared<std::vector<std::uint8_t>>(copied.begin(), copied.end());
+    std::vector<int> pasted;
+    if (!applyEdit(tr("Paste"), page, Scope::Content, [&](pdfz::Document& d) {
+          pasted = d.pasteContent(page, bytes);
+          return !pasted.empty();
+        })) {
+      emit statusMessage(tr("That couldn't be pasted."), 3000);
+      return false;
+    }
+    view_->selectContentObjects(page, pasted);
+    return true;
+  }
+  if (m->hasImage()) {
+    // A picture from another program: in the middle of what's showing, at most three inches.
+    const QImage img = qvariant_cast<QImage>(m->imageData());
+    if (img.isNull()) return false;
+    int at = page;
+    pdfz::PointF c;
+    if (!view_->visibleCenter(at, c) || at != page) {
+      const pdfz::SizeF ps = doc_->pageSize(page);
+      c = {ps.width / 2, ps.height / 2};
+    }
+    const pdfz::SizeF ps = doc_->pageSize(page);
+    const double maxSide = std::min({216.0, ps.width * 0.9, ps.height * 0.9});
+    const double k = maxSide / std::max(img.width(), img.height());
+    const double w = img.width() * k, h = img.height() * k;
+    const double x = std::clamp(c.x - w / 2, 0.0, std::max(0.0, ps.width - w));
+    const double y = std::clamp(c.y - h / 2, 0.0, std::max(0.0, ps.height - h));
+    addContentImage(page, pageImageFrom(img), pdfz::RectF{x, y, x + w, y + h});
+    return true;
+  }
+  return false;
+}
+
+void DocumentTab::arrangeContent(pdfz::Arrange how) {
+  if (!doc_) return;
+  const int page = view_->contentSelectionPage();
+  const std::vector<int> objects = view_->contentSelectionObjects();
+  if (page < 0 || objects.empty()) return;
+  QString label;
+  switch (how) {
+    case pdfz::Arrange::ToFront: label = tr("Bring to Front"); break;
+    case pdfz::Arrange::ToBack: label = tr("Send to Back"); break;
+    case pdfz::Arrange::Forward: label = tr("Bring Forward"); break;
+    case pdfz::Arrange::Backward: label = tr("Send Backward"); break;
+  }
+  std::vector<int> now;
+  if (applyEdit(label, page, Scope::Content, [&](pdfz::Document& d) {
+        now = d.arrangeContent(page, objects, how);
+        return !now.empty();
+      }))
+    view_->selectContentObjects(page, now);
 }

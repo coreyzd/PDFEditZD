@@ -75,6 +75,8 @@ struct ContentBlock;
 struct TextLines;
 struct PlacedText;
 struct Affine;
+struct PageShape;
+enum class Arrange;
 
 // The complete bytes of a PDF file, shared without copying (an open document keeps its file's
 // bytes; undo snapshots are these too).
@@ -174,6 +176,17 @@ public:
   // adding new text.
   bool replaceText(int page, const std::vector<int>& remove, const TextLines& text);
   bool replaceText(int page, const std::vector<int>& remove, const PlacedText& text);
+  // Draw order: the objects moved up or down among the page's. Returns their indices after.
+  std::vector<int> arrangeContent(int page, const std::vector<int>& objects, Arrange how);
+  // Copying and pasting: the objects as a one-page PDF of their own, the page the same size as
+  // theirs, the objects where they were on it. Pasting puts its objects on `page` in the same
+  // place (from the top-left, as the pages are shown; on the page if they'd be off it), on top
+  // of everything, and returns their indices. Empty on failure.
+  Bytes copyContent(int page, const std::vector<int>& objects) const;
+  std::vector<int> pasteContent(int page, const Bytes& copied);
+  // The page's drawing as shapes (paths, and text as outlines), for a stamp or signature.
+  // `pictures` (if given) is how many pictures there were, which aren't among the shapes.
+  std::vector<PageShape> pageShapes(int page, int* pictures = nullptr) const;
 
   // Page editing. Indices are 0-based; each returns false (and changes nothing) on bad input.
   bool deletePage(int index);

@@ -7,6 +7,7 @@
 #include <QCheckBox>
 #include <QDialogButtonBox>
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QHBoxLayout>
 #include <QImageReader>
 #include <QLabel>
@@ -150,9 +151,11 @@ SignatureDialog::SignatureDialog(bool initials, QWidget* parent) : QDialog(paren
   // Image
   auto* imagePage = new QWidget(this);
   auto* imageLay = new QVBoxLayout(imagePage);
-  auto* choose = new QPushButton(tr("Choose a Picture…"), imagePage);
+  auto* choose = new QPushButton(tr("Choose a File…"), imagePage);
   imageLay->addWidget(choose, 0, Qt::AlignLeft);
-  imagePreview_ = new QLabel(tr("A photo or scan of your signature, on white paper."), imagePage);
+  imagePreview_ = new QLabel(tr("A drawing of your signature (SVG or PDF), which stays sharp at any size,\n"
+                                "or a photo or scan of it on white paper."),
+                             imagePage);
   imagePreview_->setAlignment(Qt::AlignCenter);
   imagePreview_->setMinimumHeight(150);
   imagePreview_->setAutoFillBackground(true);
@@ -161,17 +164,20 @@ SignatureDialog::SignatureDialog(bool initials, QWidget* parent) : QDialog(paren
   pal.setColor(QPalette::WindowText, QColor(0x70, 0x70, 0x70));
   imagePreview_->setPalette(pal);
   imageLay->addWidget(imagePreview_, 1);
-  auto* thRow = new QHBoxLayout;
+  thresholdRow_ = new QWidget(imagePage);
+  auto* thRow = new QHBoxLayout(thresholdRow_);
+  thRow->setContentsMargins(0, 0, 0, 0);
   thRow->addWidget(new QLabel(tr("Remove background:"), imagePage));
   threshold_ = new QSlider(Qt::Horizontal, imagePage);
   threshold_->setRange(120, 250);
   threshold_->setValue(200);
   threshold_->setToolTip(tr("Further right clears more of the paper (and lighter ink)"));
   thRow->addWidget(threshold_, 1);
-  imageLay->addLayout(thRow);
+  imageLay->addWidget(thresholdRow_);
+  thresholdRow_->hide();  // for a picture, once there is one
   connect(choose, &QPushButton::clicked, this, &SignatureDialog::chooseImage);
   connect(threshold_, &QSlider::valueChanged, this, &SignatureDialog::updateImage);
-  tabs_->addTab(imagePage, tr("Image"));
+  tabs_->addTab(imagePage, tr("Import"));
 
   // Ink color, saving, OK
   auto* bottom = new QHBoxLayout;
@@ -239,21 +245,54 @@ void SignatureDialog::updateTyped() {
 }
 
 void SignatureDialog::chooseImage() {
-  const QString path = QFileDialog::getOpenFileName(this, tr("Signature Picture"), {},
-                                                    tr("Images (*.png *.jpg *.jpeg *.bmp *.gif *.tif *.tiff)"));
+  QStringList patterns = vectorPatterns();
+  patterns << QStringList{"*.png", "*.jpg", "*.jpeg", "*.bmp", "*.gif", "*.tif", "*.tiff"};
+  const QString path = QFileDialog::getOpenFileName(
+      this, tr("Signature File"), QSettings().value("signatures/importDir").toString(),
+      tr("Drawings and pictures (%1);;Drawings (%2);;All files (*)").arg(patterns.join(' '), vectorPatterns().join(' ')));
   if (path.isEmpty()) return;
-  QImageReader reader(path);
-  reader.setAutoTransform(true);  // a phone photo's orientation
-  sourceImage_ = reader.read();
+  QSettings().setValue("signatures/importDir", QFileInfo(path).absolutePath());
+  vector_ = {};
+  sourceImage_ = {};
+  cleanImage_ = {};
+  if (isVectorFile(path)) {
+    QString error;
+    bool pictures = false;
+    vector_ = readVectorFile(path, &error, &pictures).normalized();
+    if (vector_.isEmpty()) {
+      // Nothing drawn in it (a scan saved as a PDF): it's a picture after all.
+      sourceImage_ = renderVectorFile(path, 1600);
+      if (sourceImage_.isNull()) {
+        imagePreview_->setPixmap({});
+        imagePreview_->setText(error.isEmpty() ? tr("Nothing to use was found in that file.") : error);
+        updateOk();
+        return;
+      }
+    } else {
+      thresholdRow_->hide();
+      const QSize box(std::max(200, imagePreview_->width() - 16), std::max(100, imagePreview_->height() - 16));
+      imagePreview_->setPixmap(QPixmap::fromImage(vector_.preview(box, devicePixelRatioF())));
+      if (pictures) imagePreview_->setToolTip(tr("Pictures in the file aren't included, only what's drawn."));
+      updateOk();
+      return;
+    }
+  } else {
+    QImageReader reader(path);
+    reader.setAutoTransform(true);  // a phone photo's orientation
+    sourceImage_ = reader.read();
+  }
   if (sourceImage_.isNull()) {
+    imagePreview_->setPixmap({});
     imagePreview_->setText(tr("That picture couldn't be read."));
+    updateOk();
     return;
   }
+  thresholdRow_->show();
   updateImage();
 }
 
 void SignatureDialog::updateImage() {
-  if (sourceImage_.isNull()) return;
+  if (sourceImage_.isNull() || !vector_.isEmpty()) return;
   cleanImage_ = cleanSignatureImage(sourceImage_, threshold_->value());
   if (cleanImage_.isNull()) {
     imagePreview_->setPixmap({});
@@ -284,8 +323,13 @@ Signature SignatureDialog::signature() const {
       if (fonts_->currentItem()) s.family = fonts_->currentItem()->data(Qt::UserRole).toString();
       break;
     default:
-      s.kind = Signature::Kind::Image;
-      s.image = cleanImage_;
+      if (!vector_.isEmpty()) {
+        s.kind = Signature::Kind::Vector;
+        s.art = vector_;
+      } else {
+        s.kind = Signature::Kind::Image;
+        s.image = cleanImage_;
+      }
       break;
   }
   return s;
