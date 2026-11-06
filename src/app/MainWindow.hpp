@@ -8,6 +8,7 @@
 #include "Stamps.hpp"
 
 #include <QMainWindow>
+#include <QPointer>
 
 #include <array>
 #include <functional>
@@ -107,6 +108,15 @@ private:
   void fillSignMenu(QMenu* menu);  // fills the Sign menu: saved signatures, add, remove
   // Places `sig` with the next click; asks for a new one if `sig` is empty.
   void sign(std::optional<Signature> sig, bool initials);
+  // The size a signature or initials are placed at: their usual size times the remembered
+  // scale (Smaller/Larger while placing them).
+  double signatureScale(bool initials) const;
+  // Smaller (-1) or Larger (+1): what's about to be placed (a mark, a signature, a stamp, the
+  // text tool's size), else the text being typed, else the selected comment.
+  void stepSize(int dir);
+  void updateSizeActions();
+  // Full screen shows only the pages: menus, toolbars, panels, tabs and status bar hidden.
+  void setFullScreenChrome(bool full);
   // A signature field was clicked: the newest saved signature, fitted into it.
   void signField(DocumentTab* t, int page, const pdfz::RectF& rect);
   std::optional<Signature> newSignature(bool initials);  // the dialog; saved if asked
@@ -169,6 +179,11 @@ private:
   QAction* stampAct_;
   QAction* highlightFieldsAct_;
   QAction* commentTipsAct_;
+  QAction* smallerAct_;
+  QAction* largerAct_;
+  std::optional<Signature> placingSig_;  // the signature (initials) being placed
+  bool chromeHidden_ = false;
+  std::vector<QPointer<QWidget>> hiddenForFullScreen_;
   QToolBar* fillBar_;
   QAction* editAct_;
   QAction* addTextAct_;
@@ -211,6 +226,7 @@ private:
   QComboBox* fontCombo_;
   QComboBox* sizeCombo_;
   QToolButton* textColorButton_;
+  QAction* textColorAct_;
   std::array<QAction*, 3> alignActs_{};
   std::vector<QAction*> textControls_;  // shown for text boxes only
 

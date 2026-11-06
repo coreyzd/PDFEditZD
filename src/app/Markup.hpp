@@ -62,6 +62,8 @@ struct MarkupStyle {
   QString fontName = QStringLiteral("Helv");  // Helv, TiRo or Cour
   QColor textColor;
   int align = 0;  // 0 left, 1 center, 2 right
+  // Fill & Sign marks: their width and height, in points.
+  double size = 14;
 };
 
 // A change to some of a comment's style; what's left empty stays as it is.
@@ -74,6 +76,7 @@ struct StyleChange {
   std::optional<QString> fontName{};
   std::optional<QColor> textColor{};
   std::optional<int> align{};
+  std::optional<double> size{};  // a mark tool's size (not a placed mark's: that's a resize)
 };
 void applyStyleChange(pdfz::Annotation& a, const StyleChange& change);
 void applyStyleChange(MarkupStyle& s, const StyleChange& change);
@@ -98,7 +101,16 @@ bool usesOpacity(const pdfz::Annotation& a);
 bool isMark(const pdfz::Annotation& a);
 const char* markSubject(MarkupTool t);  // "Check", "Cross", "Dot"; nullptr for other tools
 pdfz::StampDrawing markDrawing(const std::string& subject, const QColor& color);
-double markSize(MarkupTool t);          // its usual width and height, in points
+QPainterPath markShape(const std::string& subject);  // filled, in a 100 x 100 box
+double defaultMarkSize(MarkupTool t);   // its usual width and height, in points
+// Fill & Sign text (Add Text, Date): one color, no box.
+bool isFillSignText(const pdfz::Annotation& a);
+inline bool isFillSignText(MarkupTool t) { return t == MarkupTool::FillText || t == MarkupTool::Date; }
+
+// The next size up (dir > 0) or down: font sizes through the usual list, marks, signatures
+// and stamps by a quarter.
+double stepFontSize(double size, int dir);
+double stepScale(double value, int dir, double lo, double hi);
 // A Qt path as a stamp's filled outline (any curves kept).
 pdfz::StampDrawing::Path stampPath(const QPainterPath& path, const QColor& color);
 

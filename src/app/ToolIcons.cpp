@@ -6,7 +6,11 @@
 #include <QPalette>
 #include <QPixmap>
 
+#include <QImage>
+
+#include <algorithm>
 #include <cmath>
+#include <map>
 #include <utility>
 
 namespace {
@@ -378,6 +382,57 @@ QIcon flipIcon(bool horizontal, const QPalette& palette) {
     p.setBrush(Qt::NoBrush);
     p.drawPolygon(right);
   });
+}
+
+QIcon sizeIcon(bool larger, const QPalette& palette) {
+  return drawnIcon(palette, 20, [&](QPainter& p, const QColor& ink, bool) {
+    QFont f = p.font();
+    f.setBold(true);
+    f.setPixelSize(larger ? 16 : 10);
+    p.setFont(f);
+    p.setPen(ink);
+    p.drawText(QRectF(0, larger ? 1 : 7, 14, larger ? 18 : 12), Qt::AlignCenter, QStringLiteral("A"));
+    QPolygonF arrow;
+    if (larger) arrow << QPointF(14, 9) << QPointF(19.5, 9) << QPointF(16.75, 4.5);
+    else arrow << QPointF(14, 11) << QPointF(19.5, 11) << QPointF(16.75, 15.5);
+    p.setPen(Qt::NoPen);
+    p.setBrush(ink);
+    p.drawPolygon(arrow);
+  });
+}
+
+QCursor crosshairCursor(qreal dpr) {
+  static std::map<int, QCursor> cache;
+  const int key = int(std::lround(dpr * 100));
+  if (auto it = cache.find(key); it != cache.end()) return it->second;
+  // Drawn pixel by pixel, so the lines are sharp: an odd size, the hot spot in the middle. Qt
+  // keeps the hot spot in whole logical pixels, so the arm is a length that's whole in both.
+  int hot = 11;
+  for (int k : {12, 10, 8, 14})
+    if (std::abs(k * dpr - std::round(k * dpr)) < 1e-6) {
+      hot = k;
+      break;
+    }
+  const int arm = int(std::lround(hot * dpr));
+  const int n = 2 * arm + 1;
+  const int t = std::max(1, int(std::floor(dpr + 0.01)));  // the line's thickness: whole pixels
+  const int edge = t;                                         // the light outline round it
+  QImage img(n, n, QImage::Format_ARGB32_Premultiplied);
+  img.fill(Qt::transparent);
+  const int lo = arm - t / 2;  // the line covers pixels lo to lo + t - 1
+  {
+    QPainter p(&img);
+    const QColor light(255, 255, 255, 230), dark(0, 0, 0);
+    p.fillRect(QRect(lo - edge, 0, t + 2 * edge, n), light);
+    p.fillRect(QRect(0, lo - edge, n, t + 2 * edge), light);
+    p.fillRect(QRect(lo, edge, t, n - 2 * edge), dark);
+    p.fillRect(QRect(edge, lo, n - 2 * edge, t), dark);
+  }
+  QPixmap pm = QPixmap::fromImage(img);
+  pm.setDevicePixelRatio(dpr);
+  const QCursor c(pm, hot, hot);
+  cache.emplace(key, c);
+  return c;
 }
 
 QIcon colorIcon(const QColor& color) {

@@ -4,6 +4,7 @@
 #include "InlineTextEdit.hpp"
 #include "PageRenderer.hpp"
 #include "TextSearch.hpp"
+#include "ToolIcons.hpp"
 
 #include "core/text.hpp"
 
@@ -471,6 +472,7 @@ void DocumentView::keyPressEvent(QKeyEvent* e) {
         return;
       }
       if (tool_ != Tool::Select) emit toolResetRequested();
+      else emit escapePressedAtRest();
       return;
     case Qt::Key_Delete:
     case Qt::Key_Backspace:
@@ -621,9 +623,10 @@ void DocumentView::mousePressEvent(QMouseEvent* e) {
       const double x = std::clamp(pt.x() - w / 2, 0.0, s.width - w), y = std::clamp(pt.y() - h / 2, 0.0, s.height - h);
       pdfz::Annotation a = placeStamp_;
       a.rect = {x, y, x + w, y + h};
-      hoverPage_ = -1;
+      const bool again = placesMany();
+      if (!again) hoverPage_ = -1;
       emit stampCreated(page, a, placeDrawing_);
-      emit toolResetRequested();  // one at a time
+      if (!again) emit toolResetRequested();  // a stamp: one at a time
     }
     e->accept();
     return;
@@ -752,7 +755,7 @@ void DocumentView::mouseMoveEvent(QMouseEvent* e) {
     e->accept();
     return;
   }
-  if (tool_ == Tool::Place) {
+  if (tool_ == Tool::Place || placingMark()) {
     int page;
     QPointF pt;
     if (!pagePointAt(e->position(), page, pt, false)) page = -1;
@@ -956,12 +959,12 @@ void DocumentView::updateHoverCursor(QPointF pos) {
     QToolTip::hideText();
   }
   if (tool_ == Tool::Place) {
-    viewport()->setCursor(Qt::CrossCursor);
+    viewport()->setCursor(crossCursor());
     return;
   }
   if (tool_ == Tool::Markup) {
     if (isTextMarkupTool(markupTool_)) viewport()->setCursor(overText(pos) ? Qt::IBeamCursor : Qt::OpenHandCursor);
-    else viewport()->setCursor(Qt::CrossCursor);
+    else viewport()->setCursor(crossCursor());
     return;
   }
   if (tool_ == Tool::Select) {
@@ -988,7 +991,7 @@ void DocumentView::setTool(Tool tool) {
   drag_ = Drag::None;
   if (tool != Tool::Select) clearAnnotationSelection();
   if (tool != Tool::Place) hoverPage_ = -1;
-  viewport()->setCursor(tool == Tool::Markup || tool == Tool::Place ? Qt::CrossCursor : Qt::OpenHandCursor);
+  viewport()->setCursor(tool == Tool::Markup || tool == Tool::Place ? crossCursor() : QCursor(Qt::OpenHandCursor));
   viewport()->update();
 }
 
@@ -996,6 +999,7 @@ void DocumentView::setMarkupTool(MarkupTool tool, const MarkupStyle& style) {
   markupTool_ = tool;
   markupStyle_ = style;
   setTool(Tool::Markup);
+  hoverPage_ = -1;
 }
 
 void DocumentView::contextMenuEvent(QContextMenuEvent* e) {
@@ -1099,7 +1103,7 @@ pdfz::RectF DocumentView::resizedBounds() const {
 void DocumentView::placeMark(int page, QPointF pt) {
   const char* subject = markSubject(markupTool_);
   const pdfz::SizeF s = renderer_->document()->pageSize(page);
-  const double size = markSize(markupTool_);
+  const double size = std::max(1.0, markupStyle_.size);
   const double x = std::clamp(pt.x() - size / 2, 0.0, std::max(0.0, s.width - size));
   const double y = std::clamp(pt.y() - size / 2, 0.0, std::max(0.0, s.height - size));
   pdfz::Annotation a;
@@ -1138,8 +1142,9 @@ void DocumentView::startPlacing(const pdfz::Annotation& stamp, const pdfz::Stamp
   placeDrawing_ = drawing;
   placePreview_ = preview;
   placeSize_ = size;
-  hoverPage_ = -1;
+  if (tool_ != Tool::Place) hoverPage_ = -1;  // a new size while placing: the preview stays put
   setTool(Tool::Place);
+  viewport()->update();
 }
 
 int DocumentView::resizeHandleUnder(QPointF vp) const {
@@ -1221,6 +1226,20 @@ void DocumentView::paintOverlays(QPainter& p) {
     p.setPen(QPen(accent, 1, Qt::DashLine));
     p.setBrush(Qt::NoBrush);
     p.drawRect(r);
+  }
+
+  // The check mark (cross, dot) about to be placed.
+  if (placingMark() && hoverPage_ >= 0 && hoverPage_ < int(pageRects_.size())) {
+    const double size = std::max(1.0, markupStyle_.size);
+    const QRectF r = toViewport(hoverPage_, pdfz::RectF{hoverPoint_.x() - size / 2, hoverPoint_.y() - size / 2,
+                                                        hoverPoint_.x() + size / 2, hoverPoint_.y() + size / 2});
+    p.save();
+    p.setRenderHint(QPainter::Antialiasing);
+    p.translate(r.topLeft());
+    p.scale(r.width() / 100, r.height() / 100);
+    p.setOpacity(0.55);
+    p.fillPath(markShape(markSubject(markupTool_)), markupStyle_.color);
+    p.restore();
   }
 
   // The form field with the keyboard.
@@ -1945,6 +1964,22 @@ void DocumentView::paintContent(QPainter& p) {
 void DocumentView::setHighlightFields(bool on) {
   highlightFields_ = on;
   viewport()->update();
+}
+
+void DocumentView::setPresenting(bool on) {
+  setVerticalScrollBarPolicy(on ? Qt::ScrollBarAlwaysOff : Qt::ScrollBarAlwaysOn);
+  setHorizontalScrollBarPolicy(on ? Qt::ScrollBarAlwaysOff : Qt::ScrollBarAsNeeded);
+}
+
+QCursor DocumentView::crossCursor() const { return crosshairCursor(devicePixelRatioF()); }
+
+bool DocumentView::viewportEvent(QEvent* e) {
+  // The preview of what's being placed goes when the mouse leaves the pages.
+  if (e->type() == QEvent::Leave && hoverPage_ >= 0) {
+    hoverPage_ = -1;
+    viewport()->update();
+  }
+  return QAbstractScrollArea::viewportEvent(e);
 }
 
 void DocumentView::setCommentTips(bool on) {

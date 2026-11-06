@@ -5,6 +5,7 @@
 
 #include "Markup.hpp"
 
+#include <QCursor>
 #include <QIcon>
 
 class QPalette;
@@ -28,3 +29,8 @@ QIcon textColorIcon(const QColor& color, const QPalette& palette);
 QIcon alignIcon(int align, const QPalette& palette);  // 0 left, 1 center, 2 right, 3 justified
 QIcon rotateIcon(bool clockwise, const QPalette& palette);
 QIcon flipIcon(bool horizontal, const QPalette& palette);  // left to right, or top to bottom
+QIcon sizeIcon(bool larger, const QPalette& palette);      // a big "A" and an up arrow, or small and down
+
+// A thin crosshair with a light edge, drawn for the screen's scale `dpr` (the system's
+// crosshair is a small bitmap, blurry when scaled up).
+QCursor crosshairCursor(qreal dpr);

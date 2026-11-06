@@ -146,7 +146,7 @@ MarkupStyle defaultStyle(MarkupTool t) {
       break;
     case MarkupTool::Check:
     case MarkupTool::Cross:
-    case MarkupTool::Dot: s.color = Qt::black; break;
+    case MarkupTool::Dot: s.color = Qt::black; s.size = defaultMarkSize(t); break;
     default: break;  // shapes and lines
   }
   return s;
@@ -171,6 +171,7 @@ MarkupStyle loadStyle(MarkupTool t) {
   out.fontSize = s.value(k + "fontSize", d.fontSize).toDouble();
   out.fontName = s.value(k + "fontName", d.fontName).toString();
   out.align = std::clamp(s.value(k + "align", d.align).toInt(), 0, 2);
+  out.size = std::clamp(s.value(k + "size", d.size).toDouble(), 2.0, 288.0);
   return out;
 }
 
@@ -185,6 +186,7 @@ void saveStyle(MarkupTool t, const MarkupStyle& st) {
   s.setValue(k + "fontSize", st.fontSize);
   s.setValue(k + "fontName", st.fontName);
   s.setValue(k + "align", st.align);
+  if (markSubject(t)) s.setValue(k + "size", st.size);
 }
 
 void applyStyle(pdfz::Annotation& a, const MarkupStyle& s) {
@@ -226,6 +228,7 @@ void applyStyleChange(MarkupStyle& s, const StyleChange& c) {
   if (c.fontName) s.fontName = *c.fontName;
   if (c.textColor) s.textColor = *c.textColor;
   if (c.align) s.align = std::clamp(*c.align, 0, 2);
+  if (c.size) s.size = *c.size;
 }
 
 MarkupStyle styleOf(const pdfz::Annotation& a) {
@@ -278,7 +281,27 @@ const char* markSubject(MarkupTool t) {
   }
 }
 
-double markSize(MarkupTool t) { return t == MarkupTool::Dot ? 7 : 14; }
+double defaultMarkSize(MarkupTool t) { return t == MarkupTool::Dot ? 7 : 14; }
+
+bool isFillSignText(const pdfz::Annotation& a) {
+  return a.kind == pdfz::AnnotKind::FreeText && (a.subject == "Fill Text" || a.subject == "Date");
+}
+
+double stepFontSize(double size, int dir) {
+  static const double sizes[] = {6, 7, 8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 32, 36, 42, 48, 60, 72};
+  if (dir > 0) {
+    for (double s : sizes)
+      if (s > size + 0.01) return s;
+    return std::max(size, 72.0);
+  }
+  for (auto it = std::rbegin(sizes); it != std::rend(sizes); ++it)
+    if (*it < size - 0.01) return *it;
+  return std::min(size, 6.0);
+}
+
+double stepScale(double value, int dir, double lo, double hi) {
+  return std::clamp(dir > 0 ? value * 1.25 : value / 1.25, lo, hi);
+}
 
 pdfz::StampDrawing::Path stampPath(const QPainterPath& path, const QColor& color) {
   using Op = pdfz::StampDrawing::Op;
@@ -309,7 +332,7 @@ pdfz::StampDrawing::Path stampPath(const QPainterPath& path, const QColor& color
   return out;
 }
 
-pdfz::StampDrawing markDrawing(const std::string& subject, const QColor& color) {
+QPainterPath markShape(const std::string& subject) {
   // In a 100 x 100 box; strokes become outlines, so they scale with the mark.
   QPainterPath shape;
   if (subject == "Dot") {
@@ -332,6 +355,11 @@ pdfz::StampDrawing markDrawing(const std::string& subject, const QColor& color) 
     stroker.setJoinStyle(Qt::RoundJoin);
     shape = stroker.createStroke(line);
   }
+  return shape;
+}
+
+pdfz::StampDrawing markDrawing(const std::string& subject, const QColor& color) {
+  const QPainterPath shape = markShape(subject);
   pdfz::StampDrawing d;
   d.width = d.height = 100;
   d.paths.push_back(stampPath(shape, color));

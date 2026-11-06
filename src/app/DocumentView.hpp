@@ -74,6 +74,19 @@ public:
   // stamp there (stampCreated).
   void startPlacing(const pdfz::Annotation& stamp, const pdfz::StampDrawing& drawing, const QImage& preview,
                     QSizeF size);
+  // What's being placed (Tool::Place), and its size in points.
+  const pdfz::Annotation& placingStamp() const { return placeStamp_; }
+  QSizeF placingSize() const { return placeSize_; }
+  void setPlacingSize(QSizeF size) {
+    placeSize_ = size;
+    viewport()->update();
+  }
+  // Signatures and initials are placed again and again, until Esc or another tool; a stamp once.
+  bool placesMany() const {
+    return tool_ == Tool::Place && (placeStamp_.subject == "Signature" || placeStamp_.subject == "Initials");
+  }
+  // Full screen: no scroll bars (the wheel and keys still scroll).
+  void setPresenting(bool on);
 
   // Comments. Annotations are identified by page and their index in the page's list.
   bool selectedAnnotation(int& page, int& index) const;
@@ -90,7 +103,7 @@ public:
   bool isEditingNewText() const { return editor_ != nullptr && editIndex_ < 0; }
   // A Fill & Sign tool is in use: it stays in use after each thing it places, so a form can be
   // filled in one click after another.
-  bool isFillingIn() const { return tool_ == Tool::Markup && isFillSignTool(markupTool_); }
+  bool isFillingIn() const { return (tool_ == Tool::Markup && isFillSignTool(markupTool_)) || placesMany(); }
   void startTextEdit(int page, int index, const pdfz::Annotation& a);
   // Ends the typing: emits textEditFinished. Nothing happens if there's none.
   void commitTextEdit();
@@ -172,6 +185,8 @@ signals:
   void annotationEditRequested(int page, int index);
   void annotationDeleteRequested(int page, int index);
   void annotationSelectionChanged(int page, int index);  // -1, -1 for none
+  // Esc with nothing left to cancel (the Select tool, nothing selected).
+  void escapePressedAtRest();
   // Right click: `annotIndex` is the comment clicked on (now selected), or -1.
   void contextMenuRequested(const QPoint& globalPos, int page, int annotIndex);
   void textEditStarted();
@@ -209,6 +224,7 @@ protected:
   void contextMenuEvent(QContextMenuEvent*) override;
   void changeEvent(QEvent*) override;
   bool focusNextPrevChild(bool next) override;
+  bool viewportEvent(QEvent*) override;
 
 private:
   double pixelsPerPoint() const;  // logical pixels per PDF point at the current zoom
@@ -238,6 +254,10 @@ private:
   bool pagePointAt(QPointF viewportPos, int& page, QPointF& point, bool clampToNearestPage) const;
   QRectF toViewport(int page, const pdfz::RectF& r) const;
   bool overText(QPointF viewportPos) const;
+  // A check mark, cross or dot tool: its mark is shown under the mouse.
+  bool placingMark() const { return tool_ == Tool::Markup && markSubject(markupTool_) != nullptr; }
+  // A sharp crosshair at this screen's scale.
+  QCursor crossCursor() const;
   void extendSelectionTo(QPointF viewportPos);
   void autoScrollStep();
   void updateHoverCursor(QPointF viewportPos);

@@ -34,6 +34,7 @@
 #include <QPainter>
 #include <QLabel>
 #include <QLineEdit>
+#include <QLocale>
 #include <QListWidget>
 #include <QMenu>
 #include <QMenuBar>
@@ -217,8 +218,43 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 }
 
 void MainWindow::changeEvent(QEvent* e) {
-  if (e->type() == QEvent::WindowStateChange && fullScreenAct_) fullScreenAct_->setChecked(isFullScreen());
+  if (e->type() == QEvent::WindowStateChange && fullScreenAct_) {
+    fullScreenAct_->setChecked(isFullScreen());
+    setFullScreenChrome(isFullScreen());
+  }
   QMainWindow::changeEvent(e);
+}
+
+void MainWindow::setFullScreenChrome(bool full) {
+  if (full == chromeHidden_) return;
+  chromeHidden_ = full;
+  if (full) {
+    std::vector<QWidget*> chrome{menuBar(), statusBar(), tabs_->tabBar(), findBar_};
+    for (QToolBar* b : findChildren<QToolBar*>(Qt::FindDirectChildrenOnly)) chrome.push_back(b);
+    for (QDockWidget* d : findChildren<QDockWidget*>(Qt::FindDirectChildrenOnly)) chrome.push_back(d);
+    hiddenForFullScreen_.clear();
+    for (QWidget* w : chrome)
+      if (w->isVisible()) {
+        hiddenForFullScreen_.emplace_back(w);
+        w->hide();
+      }
+  } else {
+    for (const QPointer<QWidget>& w : hiddenForFullScreen_)
+      if (w) w->show();
+    hiddenForFullScreen_.clear();
+    // Edit PDF may have been picked or put away meanwhile: its toolbar or the comment tools.
+    if (editBarShown_) {
+      markupBar_->hide();
+      editBar_->show();
+    } else {
+      editBar_->hide();
+      markupBar_->setVisible(commentBarWasShown_);
+    }
+  }
+  for (int i = 0; i < tabs_->count(); ++i)
+    if (auto* t = qobject_cast<DocumentTab*>(tabs_->widget(i))) t->view()->setPresenting(full);
+  if (full)
+    if (DocumentTab* t = tab()) t->view()->setFocus();
 }
 
 MainWindow::~MainWindow() {
@@ -306,6 +342,12 @@ void MainWindow::connectTab(DocumentTab* t) {
           [this, t](int page, const pdfz::RectF& rect) { signField(t, page, rect); });
   v->setHighlightFields(highlightFieldsAct_->isChecked());
   v->setCommentTips(commentTipsAct_->isChecked());
+  v->setPresenting(chromeHidden_);
+  v->addAction(smallerAct_);  // their keys work while the pages have the keyboard
+  v->addAction(largerAct_);
+  connect(v, &DocumentView::escapePressedAtRest, this, [this, t] {
+    if (t == tab() && isFullScreen()) fullScreenAct_->trigger();
+  });
   // Esc, again and again: out of the drag, the selection, and back to the Select tool.
   connect(v, &DocumentView::toolResetRequested, this, [this, t] {
     if (t == tab() && !selectToolAct_->isChecked()) selectToolAct_->trigger();
@@ -556,6 +598,17 @@ void MainWindow::createActions() {
       if (auto* t = qobject_cast<DocumentTab*>(tabs_->widget(i))) t->view()->setHighlightFields(on);
   });
 
+  // Smaller / Larger: - and + (or =) while the pages have the keyboard.
+  smallerAct_ = new QAction(sizeIcon(false, palette()), tr("S&maller"), this);
+  smallerAct_->setShortcut(QKeySequence(Qt::Key_Minus));
+  smallerAct_->setToolTip(tr("Smaller (-): check marks, signatures, stamps or text about to be placed, or the selected one"));
+  largerAct_ = new QAction(sizeIcon(true, palette()), tr("&Larger"), this);
+  largerAct_->setShortcuts({QKeySequence(Qt::Key_Plus), QKeySequence(Qt::Key_Equal)});
+  largerAct_->setToolTip(tr("Larger (+): check marks, signatures, stamps or text about to be placed, or the selected one"));
+  for (QAction* a : {smallerAct_, largerAct_}) a->setShortcutContext(Qt::WidgetWithChildrenShortcut);
+  connect(smallerAct_, &QAction::triggered, this, [this] { stepSize(-1); });
+  connect(largerAct_, &QAction::triggered, this, [this] { stepSize(+1); });
+
   commentTipsAct_ = new QAction(tr("Show Comment Text on &Hover"), this);
   commentTipsAct_->setCheckable(true);
   commentTipsAct_->setChecked(QSettings().value("comments/hoverText", true).toBool());
@@ -712,6 +765,9 @@ void MainWindow::createMenus() {
   connect(signMenu_, &QMenu::aboutToShow, this, [this] { fillSignMenu(signMenu_); });
   fill->addMenu(signMenu_);
   fill->addSeparator();
+  fill->addAction(smallerAct_);
+  fill->addAction(largerAct_);
+  fill->addSeparator();
   fill->addAction(highlightFieldsAct_);
   fill->addAction(saveFlatAct_);
 
@@ -769,6 +825,19 @@ void MainWindow::createMenus() {
 
   QMenu* help = menuBar()->addMenu(tr("&Help"));
   help->addAction(aboutAct_);
+
+  // The menus' shortcuts belong to the window too, so they work with the menu bar hidden (full
+  // screen).
+  std::function<void(QMenu*)> own = [&](QMenu* m) {
+    for (QAction* a : m->actions()) {
+      if (a->menu()) own(a->menu());
+      else if (!a->isSeparator() && !a->shortcut().isEmpty() &&
+               (a->shortcutContext() == Qt::WindowShortcut || a->shortcutContext() == Qt::ApplicationShortcut))
+        addAction(a);
+    }
+  };
+  for (QAction* a : menuBar()->actions())
+    if (a->menu()) own(a->menu());
   updateRecentMenu();
 }
 
@@ -835,6 +904,10 @@ void MainWindow::createToolBars() {
   connect(signDrop, &QMenu::aboutToShow, this, [this, signDrop] { fillSignMenu(signDrop); });
   signButton->setMenu(signDrop);
   fillBar_->addWidget(signButton);
+  fillBar_->addAction(smallerAct_);
+  fillBar_->addAction(largerAct_);
+  for (QAction* a : {smallerAct_, largerAct_})
+    if (QWidget* w = fillBar_->widgetForAction(a)) w->setFocusPolicy(Qt::NoFocus);
 
   // The comment tools, on their own row.
   addToolBarBreak();
@@ -905,7 +978,8 @@ void MainWindow::createToolBars() {
   textControls_.push_back(markupBar_->addWidget(sizeCombo_));
   textColorButton_ = styleButton(tr("Text color"));
   textColorButton_->setMenu(colorMenu(textColorButton_, {}, [this](const QColor& c) { changeStyle(StyleChange{.textColor = c}); }));
-  textControls_.push_back(markupBar_->addWidget(textColorButton_));
+  textColorAct_ = markupBar_->addWidget(textColorButton_);
+  textControls_.push_back(textColorAct_);
   auto* aligns = new QActionGroup(this);
   const QString alignTips[3] = {tr("Align Left"), tr("Center"), tr("Align Right")};
   for (int i = 0; i < 3; ++i) {
@@ -1265,6 +1339,7 @@ void MainWindow::closeEvent(QCloseEvent* e) {
     if (wasMaximized_) showMaximized();
     else showNormal();
   }
+  setFullScreenChrome(false);
   s.setValue("window/geometry", saveGeometry());
   if (editBarShown_) {  // saved as it is without Edit PDF
     editBar_->hide();
@@ -1572,7 +1647,11 @@ void MainWindow::applyTool() {
   // Edit PDF's toolbar takes the comment tools' place while it's in use.
   const bool editing = t && t->hasDocument() && editAct_->isChecked();
   if (editing != editBarShown_) {
-    if (editing) {
+    if (chromeHidden_) {  // full screen: shown as they should be when it ends
+      if (editing)
+        commentBarWasShown_ = std::any_of(hiddenForFullScreen_.begin(), hiddenForFullScreen_.end(),
+                                          [this](const QPointer<QWidget>& w) { return w == markupBar_; });
+    } else if (editing) {
       commentBarWasShown_ = markupBar_->isVisible();
       markupBar_->hide();
       editBar_->show();
@@ -1608,16 +1687,28 @@ void MainWindow::applyTool() {
   v->setTool(DocumentView::Tool::Select);
 }
 
-void MainWindow::changeStyle(const StyleChange& change) {
+void MainWindow::changeStyle(const StyleChange& requested) {
   DocumentTab* t = tab();
   if (!t || !t->hasDocument()) return;
   DocumentView* v = t->view();
   int page, index;
+  // Fill & Sign text has one color (it has no box): the color is the text's.
+  bool fillText = false;
+  if (const pdfz::Annotation* e = v->editedText()) fillText = isFillSignText(*e);
+  else if (v->selectedAnnotation(page, index)) fillText = t->annotation(page, index) && isFillSignText(*t->annotation(page, index));
+  else if (v->tool() == DocumentView::Tool::Markup) fillText = isFillSignText(v->markupTool());
+  StyleChange change = requested;
+  if (fillText) {
+    if (change.color && !change.textColor) change.textColor = change.color;
+    else if (change.textColor && !change.color) change.color = change.textColor;
+  }
   if (v->isEditingText()) {
-    if (v->isEditingNewText()) {  // what the text box tool makes next looks like this too
-      MarkupStyle& s = styles_[std::size_t(MarkupTool::TextBox)];
+    if (v->isEditingNewText()) {  // what the tool that made it makes next looks like this too
+      const MarkupTool tool = fillText ? MarkupTool::FillText : MarkupTool::TextBox;
+      MarkupStyle& s = styles_[std::size_t(tool)];
       applyStyleChange(s, change);
-      saveStyle(MarkupTool::TextBox, s);
+      saveStyle(tool, s);
+      if (v->tool() == DocumentView::Tool::Markup && v->markupTool() == tool) v->setMarkupStyle(s);
     }
     v->restyleTextEdit(change);
   } else if (v->selectedAnnotation(page, index)) {
@@ -1638,29 +1729,35 @@ void MainWindow::updateStyleControls() {
   DocumentTab* t = tab();
   std::optional<MarkupStyle> st;
   bool fill = false, width = false, text = false, opacity = true;
+  bool oneColor = false;  // Fill & Sign text: the color is the text's, no box
   if (t && t->hasDocument()) {
     DocumentView* v = t->view();
     int page, index;
     if (const pdfz::Annotation* e = v->editedText()) {
       st = styleOf(*e);
-      fill = width = text = true;
+      oneColor = isFillSignText(*e);
+      fill = width = !oneColor;
+      text = true;
     } else if (v->selectedAnnotation(page, index)) {
       if (const pdfz::Annotation* a = t->annotation(page, index); a && (a->editable() || isMark(*a))) {
         st = styleOf(*a);
-        fill = usesFill(*a);
-        width = usesWidth(*a);
+        oneColor = isFillSignText(*a);
+        fill = usesFill(*a) && !oneColor;
+        width = usesWidth(*a) && !oneColor;
         text = usesText(*a);
         opacity = usesOpacity(*a);
       }
     } else if (v->tool() == DocumentView::Tool::Markup) {
       const MarkupTool tool = v->markupTool();
       st = styles_[std::size_t(tool)];
+      oneColor = isFillSignText(tool);
       fill = usesFill(tool);
       width = usesWidth(tool);
       text = usesText(tool);
       opacity = usesOpacity(tool);
     }
   }
+  if (st && oneColor) st->color = st->textColor;
   colorButton_->setEnabled(st.has_value());
   colorButton_->setIcon(strokeColorIcon(st ? st->color : QColor(), palette()));
   fillButton_->setEnabled(st && fill);
@@ -1673,6 +1770,8 @@ void MainWindow::updateStyleControls() {
   if (st && width) widthCombo_->setCurrentIndex(nearestItem(widthCombo_, text || st->width > 0 ? st->width : 0.5));
   else widthCombo_->setCurrentIndex(-1);  // blank rather than a width that means nothing here
   for (QAction* a : textControls_) a->setVisible(st && text);
+  textColorAct_->setVisible(st && text && !oneColor);
+  updateSizeActions();
   if (st && text) {
     const int f = fontCombo_->findData(st->fontName);
     fontCombo_->setCurrentIndex(f >= 0 ? f : 0);
@@ -1864,15 +1963,18 @@ void MainWindow::showViewMenu(DocumentTab* t, const QPoint& globalPos, int page,
     }
     if (a && a->editable()) {
       auto restyle = [=](StyleChange c) { t->restyleAnnotation(page, annotIndex, c); };
-      QMenu* colors = colorMenu(&menu, {}, [=](const QColor& c) { restyle(StyleChange{.color = c}); });
-      colors->setTitle(textBox ? tr("Border Color") : tr("Color"));
+      const bool fillText = isFillSignText(*a);  // one color, no box
+      QMenu* colors = colorMenu(&menu, {}, [=](const QColor& c) {
+        restyle(fillText ? StyleChange{.color = c, .textColor = c} : StyleChange{.color = c});
+      });
+      colors->setTitle(textBox && !fillText ? tr("Border Color") : tr("Color"));
       menu.addMenu(colors);
-      if (usesFill(*a)) {
+      if (usesFill(*a) && !fillText) {
         QMenu* fills = colorMenu(&menu, tr("No Fill"), [=](const QColor& c) { restyle(StyleChange{.fill = c}); });
         fills->setTitle(tr("Fill Color"));
         menu.addMenu(fills);
       }
-      if (textBox) {
+      if (textBox && !fillText) {
         QMenu* texts = colorMenu(&menu, {}, [=](const QColor& c) { restyle(StyleChange{.textColor = c}); });
         texts->setTitle(tr("Text Color"));
         menu.addMenu(texts);
@@ -1883,6 +1985,12 @@ void MainWindow::showViewMenu(DocumentTab* t, const QPoint& globalPos, int page,
         o->setCheckable(true);
         o->setChecked(std::abs(a->opacity - pct / 100.0) < 0.06);
       }
+    }
+    if (a && (a->kind == pdfz::AnnotKind::Stamp || (textBox && a->editable()))) {
+      updateSizeActions();
+      menu.addSeparator();
+      menu.addAction(smallerAct_);
+      menu.addAction(largerAct_);
     }
     menu.addSeparator();
     menu.addAction(a && a->kind == pdfz::AnnotKind::Stamp ? tr("Delete") : tr("Delete Comment"), this,
@@ -1895,6 +2003,10 @@ void MainWindow::showViewMenu(DocumentTab* t, const QPoint& globalPos, int page,
     menu.addAction(strikeSelAct_);
     menu.addSeparator();
     menu.addAction(selectAllAct_);
+  }
+  if (isFullScreen()) {
+    menu.addSeparator();
+    menu.addAction(tr("Exit Full Screen"), this, [this] { fullScreenAct_->trigger(); });
   }
   menu.exec(globalPos);
 }
@@ -1928,7 +2040,9 @@ void MainWindow::fillSignMenu(QMenu* menu) {
       auto* action = new QWidgetAction(menu);
       action->setDefaultWidget(button);
       connect(button, &QToolButton::clicked, this, [this, menu, s] {
-        menu->close();
+        // Every menu it was opened from closes (Fill & Sign > Sign too), or the next click on
+        // the page would only close them.
+        while (QWidget* popup = QApplication::activePopupWidget()) popup->close();
         sign(s, s.initials);
       });
       menu->addAction(action);
@@ -2000,27 +2114,118 @@ void MainWindow::sign(std::optional<Signature> sig, bool initials) {
     if (signAct_->isChecked()) selectToolAct_->trigger();
     return;
   }
-  // Its usual size on the page: about a third of an inch tall for a signature, less for
-  // initials, and never wider than a long signature line.
-  const QSizeF size = sig->size();
+  // Its usual size on the page (about a third of an inch tall for a signature, less for
+  // initials, never wider than a long signature line), made smaller or larger as last chosen.
+  const QSizeF size = sig->placedSize() * signatureScale(initials);
   if (size.isEmpty()) return;
-  double h = initials ? 20 : 30;
-  double w = h * size.width() / size.height();
-  const double maxW = initials ? 80 : 200;
-  if (w > maxW) {
-    h *= maxW / w;
-    w = maxW;
-  }
+  const double w = size.width(), h = size.height();
   pdfz::Annotation a;
   a.kind = pdfz::AnnotKind::Stamp;
   a.subject = initials ? "Initials" : "Signature";
   a.color = fromQColor(sig->color);
-  const QImage preview = sig->preview(QSize(int(w * 4), int(h * 4)));
+  // The preview is drawn at about 6 pixels a point (sharp at 400% zoom), within reason.
+  const double px = std::clamp(6.0, 1.0, 2400.0 / std::max(w, h));
+  const QImage preview = sig->preview(QSize(int(w * px), int(h * px)));
+  const bool already = t->view()->placesMany() && placingSig_ && placingSig_->initials == initials;
+  placingSig_ = *sig;
   signAct_->setChecked(true);
   t->view()->startPlacing(a, sig->drawing(), preview, QSizeF(w, h));
   t->view()->setFocus();
-  statusBar()->showMessage(tr("Click where your %1 goes (Esc to cancel)").arg(initials ? tr("initials") : tr("signature")), 5000);
+  if (!already)
+    statusBar()->showMessage(tr("Click where your %1 go, as many times as needed; - and + change the size, Esc ends")
+                                 .arg(initials ? tr("initials") : tr("signature")),
+                             8000);
   updateStyleControls();
+}
+
+double MainWindow::signatureScale(bool initials) const {
+  return std::clamp(QSettings().value(initials ? "signatures/initialsScale" : "signatures/scale", 1.0).toDouble(), 0.2, 10.0);
+}
+
+void MainWindow::stepSize(int dir) {
+  DocumentTab* t = tab();
+  if (!t || !t->hasDocument()) return;
+  DocumentView* v = t->view();
+  auto say = [this](const QString& m) { statusBar()->showMessage(m, 3000); };
+  auto points = [](double pt) { return QLocale().toString(pt, 'g', 3); };
+  // The text being typed.
+  if (const pdfz::Annotation* e = v->editedText()) {
+    const double size = stepFontSize(e->fontSize, dir);
+    changeStyle(StyleChange{.fontSize = size});
+    say(tr("Text size: %1 pt").arg(points(size)));
+    return;
+  }
+  // A signature, initials or stamp waiting to be placed.
+  if (v->tool() == DocumentView::Tool::Place) {
+    if (v->placesMany() && placingSig_) {
+      const bool initials = placingSig_->initials;
+      const double scale = stepScale(signatureScale(initials), dir, 0.2, 10.0);
+      QSettings().setValue(initials ? "signatures/initialsScale" : "signatures/scale", scale);
+      sign(placingSig_, initials);
+      say(tr("%1 size: %2%").arg(initials ? tr("Initials") : tr("Signature")).arg(std::lround(scale * 100)));
+    } else {
+      const QSizeF now = v->placingSize();
+      const double k = stepScale(1.0, dir, 0.0, 100.0);
+      if ((dir < 0 && std::min(now.width(), now.height()) * k < 4) || (dir > 0 && std::max(now.width(), now.height()) * k > 3000))
+        return;
+      v->setPlacingSize(now * k);
+    }
+    return;
+  }
+  // The tool's next check mark, cross, dot or text.
+  if (v->tool() == DocumentView::Tool::Markup) {
+    const MarkupTool tool = v->markupTool();
+    MarkupStyle& s = styles_[std::size_t(tool)];
+    if (markSubject(tool)) {
+      s.size = std::round(stepScale(s.size, dir, 3.0, 144.0) * 2) / 2;
+      saveStyle(tool, s);
+      v->setMarkupStyle(s);
+      v->viewport()->update();
+      say(tr("%1 size: %2 pt").arg(toolName(tool), points(s.size)));
+      return;
+    }
+    int page, index;
+    if (usesText(tool) && !v->selectedAnnotation(page, index)) {
+      changeStyle(StyleChange{.fontSize = stepFontSize(s.fontSize, dir)});
+      say(tr("%1 size: %2 pt").arg(toolName(tool), points(styles_[std::size_t(tool)].fontSize)));
+      return;
+    }
+  }
+  // The selected comment: text a size up or down, a signature, stamp or mark a quarter bigger or
+  // smaller round its middle.
+  int page, index;
+  if (!v->selectedAnnotation(page, index)) return;
+  const pdfz::Annotation* a = t->annotation(page, index);
+  if (!a) return;
+  if (a->kind == pdfz::AnnotKind::FreeText && a->editable()) {
+    t->restyleAnnotation(page, index, StyleChange{.fontSize = stepFontSize(a->fontSize, dir)});
+  } else if (a->kind == pdfz::AnnotKind::Stamp) {
+    const pdfz::RectF r = a->rect.normalized();
+    const double k = stepScale(1.0, dir, 0.0, 100.0);
+    const double w = r.width() * k, h = r.height() * k;
+    if ((dir < 0 && std::min(w, h) < 3) || (dir > 0 && std::max(w, h) > 3000)) return;
+    const double cx = (r.left + r.right) / 2, cy = (r.top + r.bottom) / 2;
+    t->resizeAnnotation(page, index, pdfz::RectF{cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2});
+  }
+}
+
+void MainWindow::updateSizeActions() {
+  DocumentTab* t = tab();
+  bool can = false;
+  if (t && t->hasDocument() && !editAct_->isChecked()) {
+    DocumentView* v = t->view();
+    int page, index;
+    if (v->editedText() || v->tool() == DocumentView::Tool::Place) {
+      can = true;
+    } else if (v->tool() == DocumentView::Tool::Markup && (markSubject(v->markupTool()) || usesText(v->markupTool()))) {
+      can = true;
+    } else if (v->selectedAnnotation(page, index)) {
+      const pdfz::Annotation* a = t->annotation(page, index);
+      can = a && ((a->kind == pdfz::AnnotKind::FreeText && a->editable()) || a->kind == pdfz::AnnotKind::Stamp);
+    }
+  }
+  smallerAct_->setEnabled(can);
+  largerAct_->setEnabled(can);
 }
 
 void MainWindow::signField(DocumentTab* t, int page, const pdfz::RectF& rect) {
@@ -2284,9 +2489,9 @@ void MainWindow::fillStampMenu(QMenu* menu) {
     lay->addWidget(star);
     auto* action = new QWidgetAction(into);
     action->setDefaultWidget(row);
-    connect(button, &QToolButton::clicked, this, [menu = into, act] {
+    connect(button, &QToolButton::clicked, this, [act] {
       // The whole menu closes, submenu and all.
-      for (QWidget* w = menu; w; w = qobject_cast<QMenu*>(w->parentWidget())) w->close();
+      while (QWidget* popup = QApplication::activePopupWidget()) popup->close();
       act();
     });
     into->addAction(action);
