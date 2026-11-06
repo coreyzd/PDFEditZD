@@ -286,9 +286,14 @@ void parseDA(const std::string& da, Annotation& a, bool& hasBorder) {
   }
 }
 
+// The font names a /DA can carry: the standard ones every reader has. Another family (a text
+// box in Calibri, say) is drawn by its appearance; its /DA names Helvetica, for readers that
+// make their own appearance, and pdfz's style record keeps the family.
+bool isDAFontName(const std::string& n) { return n == "Helv" || n == "TiRo" || n == "Cour"; }
+
 std::string formatDA(const Annotation& a) {
   char buf[160];
-  const std::string font = a.fontName.empty() ? "Helv" : a.fontName;
+  const std::string font = isDAFontName(a.fontName) ? a.fontName : "Helv";
   std::snprintf(buf, sizeof buf, "/%s %g Tf %.4g %.4g %.4g rg %.4g %.4g %.4g RG", font.c_str(), a.fontSize,
                 a.textColor.r / 255.0, a.textColor.g / 255.0, a.textColor.b / 255.0, a.color.r / 255.0,
                 a.color.g / 255.0, a.color.b / 255.0);
@@ -385,7 +390,22 @@ std::optional<Color> parseHex(const std::string& s) {
 // box's border and alignment have no standard entry PDFium can write.
 std::string formatStyle(const Annotation& a) {
   std::string s = "c=" + hexColor(a.color) + ";f=" + (a.hasFill ? hexColor(a.fill) : std::string("-"));
-  if (a.kind == AnnotKind::FreeText) s += ";a=" + std::to_string(std::clamp(a.align, 0, 2));
+  if (a.kind == AnnotKind::FreeText) {
+    s += ";a=" + std::to_string(std::clamp(a.align, 0, 2));
+    if (!a.fontName.empty() && !isDAFontName(a.fontName)) {
+      std::string n;  // ';' and '=' and '%' escaped as %XX
+      for (char c : a.fontName) {
+        if (c == ';' || c == '=' || c == '%') {
+          char hex[4];
+          std::snprintf(hex, sizeof hex, "%%%02X", static_cast<unsigned char>(c));
+          n += hex;
+        } else {
+          n += c;
+        }
+      }
+      s += ";n=" + n;
+    }
+  }
   return s;
 }
 
@@ -407,6 +427,17 @@ bool parseStyle(const std::string& s, Annotation& a) {
       }
     } else if (k == "a") {
       a.align = std::clamp(std::atoi(v.c_str()), 0, 2);
+    } else if (k == "n" && !v.empty()) {
+      std::string n;
+      for (std::size_t i = 0; i < v.size(); ++i) {
+        if (v[i] == '%' && i + 2 < v.size()) {
+          n += static_cast<char>(std::strtol(v.substr(i + 1, 2).c_str(), nullptr, 16));
+          i += 2;
+        } else {
+          n += v[i];
+        }
+      }
+      a.fontName = n;
     }
   }
   return true;

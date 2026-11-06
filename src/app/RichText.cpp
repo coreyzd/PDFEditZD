@@ -4,6 +4,7 @@
 #include "Markup.hpp"
 
 #include <QFontMetricsF>
+#include <QRawFont>
 #include <QTextBlock>
 #include <QTextCursor>
 #include <QTextDocument>
@@ -268,6 +269,9 @@ pdfz::PlacedText layoutRich(const RichText& input, pdfz::TextAlign align, double
     runFont[i] = int(k);
     fontText[k] += text[i].text;
   }
+  // Fonts without a space (AutoCAD's RomanD, say) would draw their "missing" box for each
+  // one, and the text read back would lose them: their text goes word by word instead.
+  std::vector<bool> noSpace(fonts.size(), false);
   for (std::size_t k = 0; k < fonts.size(); ++k) {
     bool whole = true;
     pdfz::TextFont tf = pdfFont(fonts[k], fontText[k], &whole);
@@ -276,6 +280,10 @@ pdfz::PlacedText layoutRich(const RichText& input, pdfz::TextAlign align, double
       return out;
     }
     if (!whole && complete) *complete = false;
+    if (!tf.file.empty()) {
+      const QRawFont raw(QByteArray(reinterpret_cast<const char*>(tf.file.data()), qsizetype(tf.file.size())), 12);
+      noSpace[k] = raw.isValid() && !raw.supportsCharacter(QLatin1Char(' '));
+    }
     out.fonts.push_back(std::move(tf));
   }
   if (out.fonts.empty()) {  // no text: still a font, for an empty result
@@ -366,7 +374,7 @@ pdfz::PlacedText layoutRich(const RichText& input, pdfz::TextAlign align, double
             sp.rise = run.rise;
             placed.spans.push_back(std::move(sp));
           };
-          if (!justified) {  // in pieces between tabs, each where its tab stop puts it
+          if (!justified && !noSpace[std::size_t(runFont[starts[k].second])]) {  // in pieces between tabs, each where its tab stop puts it
             int from = a;
             for (int k2 = a; k2 <= b; ++k2) {
               if (k2 < b && s.at(k2) != QLatin1Char('\t')) continue;
@@ -375,7 +383,7 @@ pdfz::PlacedText layoutRich(const RichText& input, pdfz::TextAlign align, double
             }
             continue;
           }
-          // Justified: word by word, where the stretched spaces put them.
+          // Justified (or a font without spaces): word by word, where the spaces put them.
           int w = a;
           while (w < b) {
             while (w < b && s.at(w).isSpace()) ++w;

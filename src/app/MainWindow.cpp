@@ -35,6 +35,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QLocale>
+#include <QListView>
 #include <QListWidget>
 #include <QMenu>
 #include <QMenuBar>
@@ -968,6 +969,13 @@ void MainWindow::createToolBars() {
   fontCombo_->addItem(QStringLiteral("Courier"), QStringLiteral("Cour"));
   for (int i = 0; i < fontCombo_->count(); ++i)
     fontCombo_->setItemData(i, fontFor(fontCombo_->itemData(i).toString().toStdString(), 13), Qt::FontRole);
+  // Text boxes can be in any of the computer's fonts too (drawn in their appearance); Fill &
+  // Sign text keeps to the three standard ones (those rows are hidden for it).
+  fontCombo_->insertSeparator(3);
+  for (const QString& f : editFontFamilies())
+    if (f != "Helvetica" && f != "Times" && f != "Courier") fontCombo_->addItem(f, f);
+  fontCombo_->setMaxVisibleItems(20);
+  fontCombo_->setMinimumContentsLength(12);
   connect(fontCombo_, &QComboBox::activated, this,
           [this](int i) { changeStyle(StyleChange{.fontName = fontCombo_->itemData(i).toString()}); });
   textControls_.push_back(markupBar_->addWidget(fontCombo_));
@@ -1773,7 +1781,13 @@ void MainWindow::updateStyleControls() {
   textColorAct_->setVisible(st && text && !oneColor);
   updateSizeActions();
   if (st && text) {
-    const int f = fontCombo_->findData(st->fontName);
+    if (auto* list = qobject_cast<QListView*>(fontCombo_->view()))
+      for (int i = 3; i < fontCombo_->count(); ++i) list->setRowHidden(i, oneColor);
+    int f = fontCombo_->findData(st->fontName);
+    if (f < 0 && !st->fontName.isEmpty() && st->fontName != "Helv") {  // a font this computer lacks
+      fontCombo_->addItem(st->fontName, st->fontName);
+      f = fontCombo_->count() - 1;
+    }
     fontCombo_->setCurrentIndex(f >= 0 ? f : 0);
     sizeCombo_->setCurrentIndex(nearestItem(sizeCombo_, st->fontSize));
     textColorButton_->setIcon(textColorIcon(st->textColor, palette()));
@@ -2026,6 +2040,26 @@ void MainWindow::fillSignMenu(QMenu* menu) {
   menu->clear();
   const QList<Signature> saved = SignatureStore::load();
   const qreal dpr = devicePixelRatioF();
+  // On a dark menu, dark ink is hard to see: its lightness turned round (black shows white, dark
+  // blue light blue), the colors kept.
+  const bool dark = menu->palette().color(QPalette::Window).lightness() < 128;
+  auto pic = [dark](const QImage& preview) {
+    if (!dark) return QPixmap::fromImage(preview);
+    QImage img = preview.convertToFormat(QImage::Format_ARGB32);
+    for (int y = 0; y < img.height(); ++y) {
+      auto* line = reinterpret_cast<QRgb*>(img.scanLine(y));
+      for (int x = 0; x < img.width(); ++x) {
+        const QRgb px = line[x];
+        if (qAlpha(px) == 0) continue;
+        QColor c = QColor::fromRgb(px);
+        float h, s, l, a;
+        c.getHslF(&h, &s, &l, &a);
+        c.setHslF(h, s, 1.0f - l, 1.0f);
+        line[x] = qRgba(c.red(), c.green(), c.blue(), qAlpha(px));
+      }
+    }
+    return QPixmap::fromImage(img);
+  };
   // Saved ones as themselves, big enough to tell apart (menu icons are tiny).
   auto addSaved = [&](bool initials) {
     for (const Signature& s : saved) {
@@ -2034,7 +2068,7 @@ void MainWindow::fillSignMenu(QMenu* menu) {
       auto* button = new QToolButton(menu);
       button->setAutoRaise(true);
       button->setIconSize(box);
-      button->setIcon(QIcon(QPixmap::fromImage(s.preview(box, dpr))));
+      button->setIcon(QIcon(pic(s.preview(box, dpr))));
       button->setToolTip(initials ? tr("Place these initials") : tr("Place this signature"));
       button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
       auto* action = new QWidgetAction(menu);
@@ -2057,13 +2091,13 @@ void MainWindow::fillSignMenu(QMenu* menu) {
     menu->addSeparator();
     QMenu* exportMenu = menu->addMenu(tr("Export Saved…"));
     for (const Signature& s : saved) {
-      QAction* a = exportMenu->addAction(QIcon(QPixmap::fromImage(s.preview(QSize(100, 30), dpr))),
+      QAction* a = exportMenu->addAction(QIcon(pic(s.preview(QSize(100, 30), dpr))),
                                          s.initials ? tr("Initials") : tr("Signature"), this, [this, s] { exportSignatureAs(s); });
       a->setIconVisibleInMenu(true);
     }
     QMenu* remove = menu->addMenu(tr("Remove Saved"));
     for (const Signature& s : saved) {
-      QAction* a = remove->addAction(QIcon(QPixmap::fromImage(s.preview(QSize(100, 30), dpr))),
+      QAction* a = remove->addAction(QIcon(pic(s.preview(QSize(100, 30), dpr))),
                                      s.initials ? tr("Initials") : tr("Signature"), this, [this, id = s.id] {
         SignatureStore::remove(id);
         statusBar()->showMessage(tr("Removed the saved signature"), 3000);

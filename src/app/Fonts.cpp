@@ -9,7 +9,14 @@
 #include <QHash>
 #include <QProcess>
 #include <QRawFont>
+#include <QRegularExpression>
+#include <QSet>
 #include <QSettings>
+
+#include <algorithm>
+#include <climits>
+#include <cstring>
+#include <optional>
 
 namespace {
 
@@ -32,44 +39,180 @@ QString standardName(Standard s, bool bold, bool italic) {
   }
 }
 
-// The computer's font file for a family and style, or empty.
+// An installed font file and what its name table says it is.
+struct FontFace {
+  QString file;
+  QStringList families;  // its typographic family (name 16) and its family (name 1)
+  QString postscript;    // name 6: "RobotoMono-Regular", "RomanD"
+  int weight = 400;
+  bool italic = false;
+};
+
+quint16 be16(const char* p) { return quint16((quint8(p[0]) << 8) | quint8(p[1])); }
+quint32 be32(const char* p) { return (quint32(be16(p)) << 16) | be16(p + 2); }
+
+// Reads only the table directory, the name table and the style bits: a few kilobytes a font.
+// TrueType and OpenType files only (a collection, .ttc, can't be embedded as it is).
+std::optional<FontFace> readFace(const QString& path) {
+  QFile f(path);
+  if (!f.open(QIODevice::ReadOnly)) return std::nullopt;
+  const QByteArray head = f.read(12);
+  if (head.size() < 12) return std::nullopt;
+  const quint32 tag = be32(head.constData());
+  if (tag != 0x00010000 && tag != 0x4F54544F /* OTTO */ && tag != 0x74727565 /* true */) return std::nullopt;
+  const int numTables = be16(head.constData() + 4);
+  if (numTables <= 0 || numTables > 200) return std::nullopt;
+  const QByteArray dir = f.read(16 * numTables);
+  if (dir.size() < 16 * numTables) return std::nullopt;
+  auto table = [&](const char* name, qint64 maxLen) -> QByteArray {
+    for (int t = 0; t < numTables; ++t) {
+      const char* rec = dir.constData() + 16 * t;
+      if (std::memcmp(rec, name, 4) != 0) continue;
+      const quint32 off = be32(rec + 8), len = be32(rec + 12);
+      if (!f.seek(off)) return {};
+      return f.read(std::min<qint64>(len, maxLen));
+    }
+    return {};
+  };
+  FontFace face;
+  face.file = path;
+  const QByteArray name = table("name", 1 << 20);
+  if (name.size() < 6) return std::nullopt;
+  const int count = be16(name.constData() + 2), strings = be16(name.constData() + 4);
+  // For each name ID, the best string: Windows Unicode US English, else Windows Unicode, else Mac.
+  QHash<int, std::pair<int, QString>> best;
+  for (int r = 0; r < count && 6 + 12 * (r + 1) <= name.size(); ++r) {
+    const char* rec = name.constData() + 6 + 12 * r;
+    const int platform = be16(rec), encoding = be16(rec + 2), language = be16(rec + 4), id = be16(rec + 6);
+    const int len = be16(rec + 8), off = be16(rec + 10);
+    if (id != 1 && id != 2 && id != 6 && id != 16 && id != 17) continue;
+    if (strings + off + len > name.size()) continue;
+    const char* str = name.constData() + strings + off;
+    QString text;
+    int rank;
+    if (platform == 3 && (encoding == 1 || encoding == 10 || encoding == 0)) {
+      for (int k = 0; k + 1 < len; k += 2) text += QChar(be16(str + k));
+      rank = language == 0x409 ? 3 : 2;
+    } else if (platform == 1 && encoding == 0) {
+      text = QString::fromLatin1(str, len);
+      rank = language == 0 ? 1 : 0;
+    } else {
+      continue;
+    }
+    text = text.trimmed();
+    if (text.isEmpty()) continue;
+    if (!best.contains(id) || best[id].first < rank) best[id] = {rank, text};
+  }
+  for (int id : {16, 1})
+    if (best.contains(id) && !face.families.contains(best[id].second, Qt::CaseInsensitive)) face.families << best[id].second;
+  if (face.families.isEmpty()) return std::nullopt;
+  face.postscript = best.value(6).second;
+  const QString sub = (best.contains(17) ? best[17] : best.value(2)).second.toLower();
+  const QByteArray os2 = table("OS/2", 64);
+  if (os2.size() >= 64) {
+    face.weight = be16(os2.constData() + 4);
+    const int sel = be16(os2.constData() + 62);
+    face.italic = (sel & 1) != 0;
+    if ((sel & 0x20) && face.weight < 600) face.weight = 700;
+  } else {
+    if (sub.contains("bold") || sub.contains("black") || sub.contains("heavy")) face.weight = 700;
+  }
+  face.italic = face.italic || sub.contains("italic") || sub.contains("oblique");
+  return face;
+}
+
+// The font files installed on this computer, read once.
+const std::vector<FontFace>& installedFaces() {
+  static const std::vector<FontFace> faces = [] {
+    QStringList files;
+#ifdef Q_OS_WIN
+    // Installed fonts are listed in the registry, as a file in the Windows font folder or, for
+    // fonts installed for one user, a full path.
+    const QString winFonts = QDir::fromNativeSeparators(qEnvironmentVariable("WINDIR", "C:\\Windows")) + "/Fonts/";
+    for (const char* hive : {"HKEY_LOCAL_MACHINE", "HKEY_CURRENT_USER"}) {
+      QSettings reg(QString(hive) + "\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Fonts", QSettings::NativeFormat);
+      for (const QString& key : reg.allKeys()) {
+        QString file = QDir::fromNativeSeparators(reg.value(key).toString());
+        if (QFileInfo(file).isRelative()) file = winFonts + file;
+        files << file;
+      }
+    }
+    const QString userFonts = QDir::fromNativeSeparators(qEnvironmentVariable("LOCALAPPDATA")) + "/Microsoft/Windows/Fonts";
+    for (const QString& f : QDir(userFonts).entryList({"*.ttf", "*.otf"}, QDir::Files)) files << userFonts + "/" + f;
+#else
+    QProcess fc;
+    fc.start("fc-list", {"--format=%{file}\n"});
+    if (fc.waitForFinished(5000)) files = QString::fromLocal8Bit(fc.readAllStandardOutput()).split('\n', Qt::SkipEmptyParts);
+#endif
+    std::vector<FontFace> out;
+    QSet<QString> seen;
+    for (const QString& file : files) {
+      const QString key = file.toLower();
+      if (seen.contains(key) || !(key.endsWith(".ttf") || key.endsWith(".otf"))) continue;
+      seen.insert(key);
+      if (auto face = readFace(file)) out.push_back(std::move(*face));
+    }
+    return out;
+  }();
+  return faces;
+}
+
+// "Roboto Mono" and "RobotoMono" alike.
+QString squeezed(const QString& s) {
+  QString out;
+  for (QChar c : s)
+    if (c.isLetterOrNumber()) out += c.toLower();
+  return out;
+}
+
+// The computer's font file for a family and style, or empty: the face of that family whose
+// boldness and slant come closest.
 QString fontFile(const QString& family, bool bold, bool italic) {
   static QHash<QString, QString> cache;
   const QString key = family + (bold ? "/b" : "/") + (italic ? "i" : "");
   if (auto it = cache.find(key); it != cache.end()) return *it;
+  const QString want = squeezed(family);
   QString found;
-#ifdef Q_OS_WIN
-  // The registry lists installed fonts as "Calibri Bold Italic (TrueType)" = "calibriz.ttf"
-  // (the Windows font folder) or a full path (fonts installed for one user).
-  const QString style = QString(bold ? " Bold" : "") + (italic ? " Italic" : "");
-  const QString winFonts = QDir::fromNativeSeparators(qEnvironmentVariable("WINDIR", "C:\\Windows")) + "/Fonts/";
-  for (const char* hive : {"HKEY_LOCAL_MACHINE", "HKEY_CURRENT_USER"}) {
-    QSettings reg(QString(hive) + "\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Fonts", QSettings::NativeFormat);
-    for (const QString& name : reg.allKeys()) {
-      const QString base = name.section(" (", 0, 0);
-      if (base.compare(family + style, Qt::CaseInsensitive) != 0) continue;
-      QString file = reg.value(name).toString();
-      if (QFileInfo(file).isRelative()) file = winFonts + file;
-      if (file.endsWith(".ttf", Qt::CaseInsensitive) || file.endsWith(".otf", Qt::CaseInsensitive)) found = file;
+  int bestScore = INT_MAX;
+  for (const FontFace& face : installedFaces()) {
+    if (std::none_of(face.families.begin(), face.families.end(), [&](const QString& f) { return squeezed(f) == want; }))
+      continue;
+    const int score = ((face.weight >= 600) != bold ? 1000 : 0) + (face.italic != italic ? 2000 : 0) +
+                      std::abs(face.weight - (bold ? 700 : 400));
+    if (score < bestScore) {
+      bestScore = score;
+      found = face.file;
     }
-    if (!found.isEmpty()) break;
   }
-#else
-  QProcess fc;
-  fc.start("fc-match", {"--format=%{file}", family + (bold ? ":bold" : "") + (italic ? ":italic" : "")});
-  if (fc.waitForFinished(3000)) {
-    const QString file = QString::fromLocal8Bit(fc.readAllStandardOutput()).trimmed();
-    // fc-match always answers with something: only take it if it's the family asked for.
-    QProcess fam;
-    fam.start("fc-query", {"--format=%{family}", file});
-    if (fam.waitForFinished(3000) &&
-        QString::fromLocal8Bit(fam.readAllStandardOutput()).split(',').contains(family, Qt::CaseInsensitive) &&
-        (file.endsWith(".ttf", Qt::CaseInsensitive) || file.endsWith(".otf", Qt::CaseInsensitive)))
-      found = file;
-  }
-#endif
   cache.insert(key, found);
   return found;
+}
+
+// The installed family a PDF's font is, by its family or font name ("RomanD", "Roboto Mono",
+// "RobotoMono-Regular", "Arial-BoldMT"), or empty.
+QString installedFamily(const QString& pdfFamily, const QString& fontName) {
+  const QStringList families = QFontDatabase::families();
+  for (const QString& f : families)
+    if (f.compare(pdfFamily, Qt::CaseInsensitive) == 0) return f;
+  QString base = fontName.section(QRegularExpression("[-,]"), 0, 0);
+  for (const char* suffix : {"PSMT", "PS", "MT"})
+    if (base.endsWith(QLatin1String(suffix)) && base.size() > int(std::strlen(suffix))) {
+      base.chop(int(std::strlen(suffix)));
+      break;
+    }
+  for (const QString& name : {pdfFamily, base, fontName}) {
+    const QString want = squeezed(name);
+    if (want.isEmpty()) continue;
+    for (const QString& f : families)
+      if (squeezed(f) == want) return f;
+  }
+  // By the font's PostScript name, as the font file gives it.
+  for (const FontFace& face : installedFaces())
+    if (!fontName.isEmpty() && face.postscript.compare(fontName, Qt::CaseInsensitive) == 0)
+      for (const QString& fam : face.families)
+        for (const QString& f : families)
+          if (f.compare(fam, Qt::CaseInsensitive) == 0) return f;
+  return {};
 }
 
 }  // namespace
@@ -87,7 +230,10 @@ EditFont editFontFor(const std::string& pdfFamily, const std::string& fontName, 
     case Standard::Helvetica: f.family = family.contains("Arial", Qt::CaseInsensitive) ? "Arial" : "Helvetica"; break;
     case Standard::Times: f.family = family.contains("New", Qt::CaseInsensitive) ? "Times New Roman" : "Times"; break;
     case Standard::Courier: f.family = family.contains("New", Qt::CaseInsensitive) ? "Courier New" : "Courier"; break;
-    default: f.family = QFontDatabase::families().contains(family, Qt::CaseInsensitive) ? family : QStringLiteral("Helvetica");
+    default: {
+      const QString installed = installedFamily(family, QString::fromStdString(fontName));
+      f.family = installed.isEmpty() ? QStringLiteral("Helvetica") : installed;
+    }
   }
   return f;
 }

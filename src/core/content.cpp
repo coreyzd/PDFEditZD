@@ -21,6 +21,56 @@ namespace detail {
 std::u16string toUtf16(const std::string& s);
 std::string toUtf8(const std::u16string& s);
 PageFrame frameOfPage(void* page);
+
+// A page's content as a form XObject in `dest`, its objects in the page's own space.
+// FPDF_NewXObjectFromPage turns the content upright by the page's /Rotate (it's made for
+// putting pages side by side), which would turn every object taken out of it a quarter or half
+// round: so the rotation is off while it's made. `loaded` is the page, loaded from `src`.
+void* pageXObject(void* dest, void* src, int index, void* loaded) {
+  auto page = static_cast<FPDF_PAGE>(loaded);
+  const int rotation = page ? FPDFPage_GetRotation(page) : 0;
+  if (rotation != 0) FPDFPage_SetRotation(page, 0);
+  FPDF_XOBJECT x = FPDF_NewXObjectFromPage(static_cast<FPDF_DOCUMENT>(dest), static_cast<FPDF_DOCUMENT>(src), index);
+  if (rotation != 0) FPDFPage_SetRotation(page, rotation);
+  return x;
+}
+
+// What turns the objects of a form made by pageXObject back into the page's space: the form
+// may still move them (a page whose box doesn't start at 0, 0). Found from an object that's
+// on both: `child` x the result = the object on the page. False if it can't be told.
+bool formToPage(void* loaded, void* formObject, FS_MATRIX* out) {
+  auto page = static_cast<FPDF_PAGE>(loaded);
+  auto form = static_cast<FPDF_PAGEOBJECT>(formObject);
+  *out = FS_MATRIX{1, 0, 0, 1, 0, 0};
+  const int n = FPDFPage_CountObjects(page);
+  if (FPDFFormObj_CountObjects(form) != n) return false;
+  auto close = [](const FS_MATRIX& p, const FS_MATRIX& q) {
+    const float s = 1e-3f * (1 + std::abs(p.e) + std::abs(p.f));
+    return std::abs(p.a - q.a) < 1e-4f && std::abs(p.b - q.b) < 1e-4f && std::abs(p.c - q.c) < 1e-4f &&
+           std::abs(p.d - q.d) < 1e-4f && std::abs(p.e - q.e) < s && std::abs(p.f - q.f) < s;
+  };
+  bool differs = false;
+  for (int i = 0; i < n; ++i) {
+    FS_MATRIX mp{}, mc{};
+    if (!FPDFPageObj_GetMatrix(FPDFPage_GetObject(page, i), &mp) || !FPDFPageObj_GetMatrix(FPDFFormObj_GetObject(form, i), &mc))
+      continue;
+    if (close(mp, mc)) continue;
+    differs = true;
+    const double det = double(mc.a) * mc.d - double(mc.b) * mc.c;
+    if (std::abs(det) < 1e-9) continue;
+    // inverse(mc) x mp, in PDF's row-vector order.
+    const double ia = mc.d / det, ib = -mc.b / det, ic = -mc.c / det, id = mc.a / det;
+    const double ie = -(mc.e * ia + mc.f * ic), iff = -(mc.e * ib + mc.f * id);
+    out->a = float(ia * mp.a + ib * mp.c);
+    out->b = float(ia * mp.b + ib * mp.d);
+    out->c = float(ic * mp.a + id * mp.c);
+    out->d = float(ic * mp.b + id * mp.d);
+    out->e = float(ie * mp.a + iff * mp.c + mp.e);
+    out->f = float(ie * mp.b + iff * mp.d + mp.f);
+    return true;
+  }
+  return !differs;
+}
 }  // namespace detail
 
 bool standardFontCanShow(const std::string& utf8) {
@@ -692,14 +742,15 @@ void* Document::pageForContentEdit(int pageIndex) {
   const int n = FPDFPage_CountObjects(page);
   if (n < 2) return page;
   FPDF_DOCUMENT doc = static_cast<FPDF_DOCUMENT>(doc_);
-  FPDF_XOBJECT xobj = FPDF_NewXObjectFromPage(doc, doc, pageIndex);
+  auto xobj = static_cast<FPDF_XOBJECT>(detail::pageXObject(doc, doc, pageIndex, page));
   if (!xobj) return page;
   FPDF_PAGEOBJECT form = FPDF_NewFormObjectFromXObject(xobj);
   FPDF_CloseXObject(xobj);
   if (!form) return page;
-  // Only if every object is there both ways (an edit not yet written would be lost).
+  // Only if every object is there both ways (an edit not yet written would be lost), and they
+  // can be put back where they are.
   FS_MATRIX m{};
-  if (FPDFFormObj_CountObjects(form) != n || !FPDFPageObj_GetMatrix(form, &m)) {
+  if (FPDFFormObj_CountObjects(form) != n || !detail::formToPage(page, form, &m)) {
     FPDFPageObj_Destroy(form);
     return page;
   }

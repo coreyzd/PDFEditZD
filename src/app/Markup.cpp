@@ -395,6 +395,8 @@ QFont fontFor(const std::string& name, double pixelSize) {
   } else if (name == "Cour") {
     f.setFamily(QStringLiteral("Courier New"));
     f.setStyleHint(QFont::TypeWriter);
+  } else if (!name.empty() && name != "Helv") {  // a family of the computer's (a text box in Calibri)
+    f.setFamily(QString::fromStdString(name));
   } else {
     f.setFamily(QStringLiteral("Helvetica"));  // Arial on Windows
     f.setStyleHint(QFont::SansSerif);

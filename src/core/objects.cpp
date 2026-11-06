@@ -21,6 +21,8 @@ namespace pdfz {
 
 namespace detail {
 PageFrame frameOfPage(void* page);
+void* pageXObject(void* dest, void* src, int index, void* loaded);
+bool formToPage(void* loaded, void* formObject, FS_MATRIX* out);
 }  // namespace detail
 
 namespace {
@@ -178,11 +180,11 @@ Bytes Document::copyContent(int pageIndex, const std::vector<int>& objects) cons
   const PageFrame f = detail::frameOfPage(page);
   Bytes result;
   FPDF_PAGE np = FPDFPage_New(out, 0, f.uprightWidth(), f.uprightHeight());
-  FPDF_XOBJECT xobj = np ? FPDF_NewXObjectFromPage(out, src, pageIndex) : nullptr;
+  auto xobj = np ? static_cast<FPDF_XOBJECT>(detail::pageXObject(out, src, pageIndex, page)) : nullptr;
   FPDF_PAGEOBJECT form = xobj ? FPDF_NewFormObjectFromXObject(xobj) : nullptr;
   if (xobj) FPDF_CloseXObject(xobj);
   FS_MATRIX m{};
-  if (form && FPDFFormObj_CountObjects(form) == n && FPDFPageObj_GetMatrix(form, &m)) {
+  if (form && FPDFFormObj_CountObjects(form) == n && detail::formToPage(page, form, &m)) {
     FPDFPage_SetMediaBox(np, float(f.x0), float(f.y0), float(f.x1), float(f.y1));
     FPDFPage_SetRotation(np, f.rotation / 90);
     for (int i = 0; FPDFFormObj_CountObjects(form) > 0; ++i) {
@@ -224,11 +226,11 @@ std::vector<int> Document::pasteContent(int pageIndex, const Bytes& copied) {
   if (sp && page) {
     const PageFrame from = detail::frameOfPage(sp), to = detail::frameOfPage(page);
     FPDF_DOCUMENT dst = static_cast<FPDF_DOCUMENT>(doc_);
-    FPDF_XOBJECT xobj = FPDF_NewXObjectFromPage(dst, src, 0);
+    auto xobj = static_cast<FPDF_XOBJECT>(detail::pageXObject(dst, src, 0, sp));
     FPDF_PAGEOBJECT form = xobj ? FPDF_NewFormObjectFromXObject(xobj) : nullptr;
     if (xobj) FPDF_CloseXObject(xobj);
     FS_MATRIX fm{1, 0, 0, 1, 0, 0};
-    if (form && FPDFPageObj_GetMatrix(form, &fm)) {
+    if (form && detail::formToPage(sp, form, &fm)) {
       // Where they were on their page as shown (from its top-left) is where they go on this one.
       auto map = [&](PointF p) { return to.toUser(from.toDisplay(p)); };
       FS_MATRIX place = matrixOf(map({0, 0}), map({1, 0}), map({0, 1}));

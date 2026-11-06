@@ -391,6 +391,90 @@ TEST_CASE("copying and pasting between documents, in the same place") {
   CHECK(blocks[0].rect.right < 150);
 }
 
+namespace {
+
+// A one-page PDF of these content streams, its box `box`, turned by `rotate`.
+std::unique_ptr<Document> fromStreams(const std::vector<std::string>& streams, const std::string& box, int rotate) {
+  std::string pdf = "%PDF-1.7\n";
+  std::vector<std::size_t> offs;
+  auto obj = [&](const std::string& body) {
+    offs.push_back(pdf.size());
+    pdf += std::to_string(offs.size()) + " 0 obj\n" + body + "\nendobj\n";
+  };
+  std::string refs;
+  for (std::size_t i = 0; i < streams.size(); ++i) refs += std::to_string(5 + i) + " 0 R ";
+  obj("<< /Type /Catalog /Pages 2 0 R >>");
+  obj("<< /Type /Pages /Kids [3 0 R] /Count 1 >>");
+  obj("<< /Type /Page /Parent 2 0 R /MediaBox [" + box + "] /Rotate " + std::to_string(rotate) + " /Contents [" + refs +
+      "] /Resources << /Font << /F1 4 0 R >> >> >>");
+  obj("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>");
+  for (const std::string& s : streams) obj("<< /Length " + std::to_string(s.size()) + " >>\nstream\n" + s + "\nendstream");
+  const std::size_t xref = pdf.size();
+  pdf += "xref\n0 " + std::to_string(offs.size() + 1) + "\n0000000000 65535 f \n";
+  for (std::size_t o : offs) {
+    char line[24];
+    std::snprintf(line, sizeof line, "%010zu 00000 n \n", o);
+    pdf += line;
+  }
+  pdf += "trailer\n<< /Size " + std::to_string(offs.size() + 1) + " /Root 1 0 R >>\nstartxref\n" + std::to_string(xref) +
+         "\n%%EOF\n";
+  auto bytes = std::make_shared<std::vector<std::uint8_t>>(pdf.begin(), pdf.end());
+  auto [d, err] = Document::openBytes(bytes);
+  REQUIRE(d);
+  return std::move(d);
+}
+
+}  // namespace
+
+TEST_CASE("a turned page (and one whose box isn't at 0, 0) keeps its drawing when something moves") {
+  // A drawing turned a quarter in its content, on a page turned again by /Rotate, as CAD
+  // programs plot them.
+  const std::string draw =
+      "0 0 0 RG 2 w 50 50 m 500 50 l 500 300 l S BT /F1 30 Tf 60 320 Td (TITLE TEXT) Tj ET 0 0 1 rg 400 400 80 40 re f";
+  for (int rotate : {90, 270}) {
+    for (const std::string& box : {std::string("0 0 612 792"), std::string("100 100 712 892")}) {
+      CAPTURE(rotate);
+      CAPTURE(box);
+      const std::string shift = box[0] == '1' ? "1 0 0 1 100 100 cm " : "";
+      auto doc = fromStreams({"q " + shift + "0 1 -1 0 612 0 cm", draw, "Q"}, box, rotate);
+      const auto before = doc->contentBlocks(0);
+      const ContentBlock* title = textBlock(before, "TITLE");
+      REQUIRE(title);
+      const ContentBlock* rect = nullptr;
+      for (const ContentBlock& b : before)
+        if (b.kind == ContentBlock::Kind::Graphic && b.rect.width() < 100) rect = &b;
+      REQUIRE(rect);
+      REQUIRE(doc->moveContent(0, rect->objects, 20, 0));
+      auto again = reopen(*doc);
+      const auto after = again->contentBlocks(0);
+      const ContentBlock* t2 = textBlock(after, "TITLE");
+      REQUIRE(t2);
+      CHECK(t2->rect.left == doctest::Approx(title->rect.left).epsilon(0.01));
+      CHECK(t2->rect.top == doctest::Approx(title->rect.top).epsilon(0.01));
+      CHECK(t2->rect.width() == doctest::Approx(title->rect.width()).epsilon(0.01));
+      bool moved = false;
+      for (const ContentBlock& b : after)
+        if (b.kind == ContentBlock::Kind::Graphic && std::abs(b.rect.left - (rect->rect.left + 20)) < 0.5 &&
+            std::abs(b.rect.top - rect->rect.top) < 0.5)
+          moved = true;
+      CHECK(moved);
+
+      // Copied from it, pasted on an upright page: where it was shown.
+      const auto copied = again->copyContent(0, t2->objects);
+      REQUIRE(copied);
+      const pdfz::SizeF shown = again->pageSize(0);
+      auto dst = Document::create();
+      REQUIRE(dst->insertBlankPage(0, {shown.width, shown.height}));
+      REQUIRE(dst->pasteContent(0, copied).size() == 1);
+      const auto pasted = reopen(*dst)->contentBlocks(0);
+      REQUIRE(pasted.size() == 1);
+      CHECK(pasted[0].rect.left == doctest::Approx(t2->rect.left).epsilon(0.01));
+      CHECK(pasted[0].rect.top == doctest::Approx(t2->rect.top).epsilon(0.01));
+      CHECK(pasted[0].rect.height() == doctest::Approx(t2->rect.height()).epsilon(0.01));
+    }
+  }
+}
+
 TEST_CASE("a page's drawing as shapes: paths and the outlines of text") {
   auto doc = splitStreams();
   int pictures = -1;
