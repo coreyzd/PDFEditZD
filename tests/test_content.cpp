@@ -475,6 +475,45 @@ TEST_CASE("a turned page (and one whose box isn't at 0, 0) keeps its drawing whe
   }
 }
 
+TEST_CASE("the first thing on a page moved again and again, its first stream only setting up") {
+  // As AutoCAD writes them: a stream that only scales, then the drawing; the first object (a
+  // watermark) is in the second stream. Moving it twice blanked the page, then made copies.
+  auto doc = fromStreams({"0.5 0 0 0.5 0 0 cm", "0 0 1 rg 100 100 200 200 re f",
+                          "1 0 0 rg 500 100 100 100 re f BT /F1 48 Tf 500 500 Td (Hello) Tj ET"},
+                         "0 0 400 300", 0);
+  auto big = [](const std::vector<ContentBlock>& bs) {
+    const ContentBlock* out = nullptr;
+    for (const ContentBlock& b : bs)
+      if (b.kind == ContentBlock::Kind::Graphic && (!out || b.rect.width() > out->rect.width())) out = &b;
+    return out;
+  };
+  const auto start = doc->contentBlocks(0);
+  REQUIRE(start.size() == 3);
+  const pdfz::RectF square = big(start)->rect;  // 50, 150 - 200, 250 shown
+  const pdfz::RectF hello = textBlock(start, "Hello")->rect;
+  for (int k = 1; k <= 3; ++k) {
+    CAPTURE(k);
+    const auto blocks = doc->contentBlocks(0);
+    const ContentBlock* sq = big(blocks);
+    REQUIRE(sq);
+    const auto objects = sq->objects;
+    REQUIRE(doc->moveContent(0, objects, 10, 0));
+    auto again = reopen(*doc);
+    for (Document* d : {doc.get(), again.get()}) {
+      const auto now = d->contentBlocks(0);
+      CHECK(now.size() == 3);
+      const ContentBlock* moved = big(now);
+      REQUIRE(moved);
+      CHECK(moved->rect.left == doctest::Approx(square.left + 10 * k));
+      CHECK(moved->rect.top == doctest::Approx(square.top));
+      CHECK(moved->objects.front() == 0);  // still first: under the rest
+      const ContentBlock* h = textBlock(now, "Hello");
+      REQUIRE(h);
+      CHECK(h->rect.left == doctest::Approx(hello.left).epsilon(0.01));
+    }
+  }
+}
+
 TEST_CASE("edits don't leave the page's old fonts and pictures in the file") {
   // A picture of noise (it doesn't compress) and two lines of text, then the text moved again
   // and again: each edit reads the page through a copy of its resources, and the copies the

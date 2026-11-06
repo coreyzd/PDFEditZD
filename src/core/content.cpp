@@ -45,6 +45,9 @@ bool formToPage(void* loaded, void* formObject, FS_MATRIX* out) {
   *out = FS_MATRIX{1, 0, 0, 1, 0, 0};
   const int n = FPDFPage_CountObjects(page);
   if (FPDFFormObj_CountObjects(form) != n) return false;
+  // The same objects in the same order, or nothing can be told from them.
+  for (int i = 0; i < n; ++i)
+    if (FPDFPageObj_GetType(FPDFPage_GetObject(page, i)) != FPDFPageObj_GetType(FPDFFormObj_GetObject(form, i))) return false;
   auto close = [](const FS_MATRIX& p, const FS_MATRIX& q) {
     const float s = 1e-3f * (1 + std::abs(p.e) + std::abs(p.f));
     return std::abs(p.a - q.a) < 1e-4f && std::abs(p.b - q.b) < 1e-4f && std::abs(p.c - q.c) < 1e-4f &&
@@ -68,6 +71,16 @@ bool formToPage(void* loaded, void* formObject, FS_MATRIX* out) {
     out->d = float(ic * mp.b + id * mp.d);
     out->e = float(ie * mp.a + iff * mp.c + mp.e);
     out->f = float(ie * mp.b + iff * mp.d + mp.f);
+    // It must put the others right too (checked on up to a hundred of them).
+    const int step = std::max(1, n / 100);
+    for (int j = 0; j < n; j += step) {
+      FS_MATRIX p{}, q{};
+      if (!FPDFPageObj_GetMatrix(FPDFPage_GetObject(page, j), &p) || !FPDFPageObj_GetMatrix(FPDFFormObj_GetObject(form, j), &q))
+        continue;
+      const FS_MATRIX r{q.a * out->a + q.b * out->c, q.a * out->b + q.b * out->d, q.c * out->a + q.d * out->c,
+                        q.c * out->b + q.d * out->d, q.e * out->a + q.f * out->c + out->e, q.e * out->b + q.f * out->d + out->f};
+      if (!close(p, r)) return false;
+    }
     return true;
   }
   return !differs;
@@ -824,10 +837,10 @@ bool Document::replaceText(int pageIndex, const std::vector<int>& remove, const 
 // (a scaling, say) was applied to everything drawn after it, or to text added later.
 //
 // So: the page is emptied of all but its first object (the streams that held only the others
-// go), read again (PDFium then knows the state at each stream's end as it now is), and the
-// other objects go back from the joined copy, into the first object's stream. Streams that held
-// only part of a shape stay, as stray path pieces that draw nothing. The objects keep their
-// order, and so their indices.
+// go), read again (PDFium then knows the state at each stream's end as it now is), and then
+// all the objects, the first too, are put back from the joined copy: they're all in one stream,
+// written in their order. Streams that held only part of a shape stay, as stray path pieces
+// that draw nothing. The objects keep their order, and so their indices.
 void* Document::pageForContentEdit(int pageIndex) {
   auto page = static_cast<FPDF_PAGE>(cachedPage(pageIndex));
   if (!page) return nullptr;
@@ -857,22 +870,19 @@ void* Document::pageForContentEdit(int pageIndex) {
     FPDFPageObj_Destroy(form);
     return nullptr;
   }
-  // The first object is back as it was; if not, all of them come from the copy.
-  const int kept = FPDFPage_CountObjects(page);
-  if (kept > 1) {
-    for (int i = kept - 1; i >= 0; --i) {
-      FPDF_PAGEOBJECT obj = FPDFPage_GetObject(page, i);
-      if (obj && FPDFPage_RemoveObject(page, obj)) FPDFPageObj_Destroy(obj);
-    }
+  // The first object goes too: all of them come from the copy, so they all belong to one
+  // stream and are written in their order. (Keeping it, when it was in a later stream than the
+  // others, as a picture after an AutoCAD drawing's set-up stream, left it in its own stream
+  // after them: drawn on top, and first in the list but last in the content, so the next edit
+  // matched the wrong objects up.)
+  for (int i = FPDFPage_CountObjects(page) - 1; i >= 0; --i) {
+    FPDF_PAGEOBJECT obj = FPDFPage_GetObject(page, i);
+    if (obj && FPDFPage_RemoveObject(page, obj)) FPDFPageObj_Destroy(obj);
   }
   const bool identity = m.a == 1 && m.b == 0 && m.c == 0 && m.d == 1 && m.e == 0 && m.f == 0;
-  for (int i = 0; FPDFFormObj_CountObjects(form) > 0; ++i) {
+  while (FPDFFormObj_CountObjects(form) > 0) {
     FPDF_PAGEOBJECT child = FPDFFormObj_GetObject(form, 0);
     if (!child || !FPDFFormObj_RemoveObject(form, child)) break;
-    if (i == 0 && kept == 1) {  // the page has it already
-      FPDFPageObj_Destroy(child);
-      continue;
-    }
     if (!identity) {
       FPDFPageObj_TransformF(child, &m);
       FPDFPageObj_TransformClipPath(child, m.a, m.b, m.c, m.d, m.e, m.f);
