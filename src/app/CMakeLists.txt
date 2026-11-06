@@ -46,6 +46,29 @@ if(WIN32)
   target_link_libraries(pdfeditzd PRIVATE winspool gdi32)  # WinPrint: printing through the Windows API
 endif()
 
+# HarfBuzz's subsetter: Edit PDF embeds only the characters it writes, not the whole font file
+# (Arial is a megabyte). It comes with HarfBuzz, which Qt already uses (MSYS2:
+# mingw-w64-ucrt-x86_64-harfbuzz; Debian/Ubuntu: libharfbuzz-dev). Without it, whole files.
+find_package(PkgConfig QUIET)
+if(PkgConfig_FOUND)
+  pkg_check_modules(HB_SUBSET QUIET IMPORTED_TARGET harfbuzz-subset)
+endif()
+if(HB_SUBSET_FOUND)
+  target_link_libraries(pdfeditzd PRIVATE PkgConfig::HB_SUBSET)
+  target_compile_definitions(pdfeditzd PRIVATE PDFZ_HAVE_HB_SUBSET)
+else()
+  find_path(PDFZ_HB_INCLUDE hb-subset.h PATH_SUFFIXES harfbuzz)
+  find_library(PDFZ_HB_LIB NAMES harfbuzz)
+  find_library(PDFZ_HB_SUBSET_LIB NAMES harfbuzz-subset)
+  if(PDFZ_HB_INCLUDE AND PDFZ_HB_LIB AND PDFZ_HB_SUBSET_LIB)
+    target_include_directories(pdfeditzd PRIVATE "${PDFZ_HB_INCLUDE}")
+    target_link_libraries(pdfeditzd PRIVATE "${PDFZ_HB_SUBSET_LIB}" "${PDFZ_HB_LIB}")
+    target_compile_definitions(pdfeditzd PRIVATE PDFZ_HAVE_HB_SUBSET)
+  else()
+    message(WARNING "HarfBuzz's subsetter (harfbuzz-subset) wasn't found: Edit PDF will embed whole font files")
+  endif()
+endif()
+
 install(TARGETS pdfeditzd)
 if(NOT WIN32)
   install(FILES "${PDFZ_PDFIUM_RUNTIME}" TYPE LIB)

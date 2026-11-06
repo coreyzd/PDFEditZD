@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <map>
 #include <numeric>
 
 namespace pdfz {
@@ -96,6 +97,7 @@ struct Piece {
   bool straight = false;
   std::u16string text;
   std::string font;
+  std::string family;  // from the embedded font's own name table, when it has one
   bool bold = false, italic = false;
   Color color;
 };
@@ -111,6 +113,76 @@ std::string cleanFontName(std::string name) {
       std::all_of(name.begin(), name.begin() + 6, [](char c) { return c >= 'A' && c <= 'Z'; }))
     name.erase(0, 7);
   return name;
+}
+
+bool contains(const std::string& s, const char* what);
+
+// What an embedded TrueType/OpenType font says it is, in its name and OS/2 tables. Printers
+// (Microsoft Print to PDF) name their fonts "CIDFont+F1" and leave out the weight, so the font
+// file is the only place that says it's Arial Bold.
+struct FontFileNames {
+  bool known = false;
+  std::string family, postscript;
+  bool bold = false, italic = false;
+};
+
+FontFileNames namesInFontFile(const std::vector<std::uint8_t>& d) {
+  FontFileNames out;
+  auto u16 = [&](std::size_t o) { return o + 2 <= d.size() ? unsigned(d[o] << 8 | d[o + 1]) : 0u; };
+  auto u32 = [&](std::size_t o) { return o + 4 <= d.size() ? (std::uint32_t(u16(o)) << 16) | u16(o + 2) : 0u; };
+  const std::uint32_t tag = u32(0);
+  if (tag != 0x00010000 && tag != 0x4F54544F && tag != 0x74727565) return out;
+  const unsigned numTables = u16(4);
+  std::size_t nameOff = 0, nameLen = 0, os2Off = 0, os2Len = 0;
+  for (unsigned t = 0; t < numTables; ++t) {
+    const std::size_t rec = 12 + 16 * std::size_t(t);
+    if (rec + 16 > d.size()) break;
+    const std::uint32_t off = u32(rec + 8), len = u32(rec + 12);
+    if (std::memcmp(&d[rec], "name", 4) == 0) nameOff = off, nameLen = len;
+    if (std::memcmp(&d[rec], "OS/2", 4) == 0) os2Off = off, os2Len = len;
+  }
+  if (nameOff == 0 || nameOff + 6 > d.size()) return out;
+  const unsigned count = u16(nameOff + 2), strings = u16(nameOff + 4);
+  std::map<unsigned, std::pair<int, std::string>> best;  // name ID -> (rank, UTF-8)
+  for (unsigned r = 0; r < count; ++r) {
+    const std::size_t rec = nameOff + 6 + 12 * std::size_t(r);
+    if (rec + 12 > d.size() || rec + 12 > nameOff + nameLen) break;
+    const unsigned platform = u16(rec), encoding = u16(rec + 2), language = u16(rec + 4), id = u16(rec + 6);
+    const unsigned len = u16(rec + 8), off = u16(rec + 10);
+    if (id != 1 && id != 2 && id != 6 && id != 16 && id != 17) continue;
+    const std::size_t at = nameOff + strings + off;
+    if (at + len > d.size()) continue;
+    std::string text;
+    int rank;
+    if (platform == 3 && (encoding == 0 || encoding == 1 || encoding == 10)) {
+      std::u16string w;
+      for (unsigned k = 0; k + 1 < len; k += 2) w += char16_t(u16(at + k));
+      text = detail::toUtf8(w);
+      rank = language == 0x409 ? 3 : 2;
+    } else if (platform == 1 && encoding == 0) {
+      text.assign(reinterpret_cast<const char*>(&d[at]), len);
+      rank = language == 0 ? 1 : 0;
+    } else {
+      continue;
+    }
+    if (text.empty()) continue;
+    auto it = best.find(id);
+    if (it == best.end() || it->second.first < rank) best[id] = {rank, text};
+  }
+  if (best.count(16)) out.family = best[16].second;
+  else if (best.count(1)) out.family = best[1].second;
+  if (out.family.empty()) return out;
+  out.known = true;
+  if (best.count(6)) out.postscript = best[6].second;
+  const std::string sub = best.count(17) ? best[17].second : best.count(2) ? best[2].second : "";
+  int weight = 0, selection = 0;
+  if (os2Off && os2Len >= 64 && os2Off + 64 <= d.size()) {
+    weight = int(u16(os2Off + 4));
+    selection = int(u16(os2Off + 62));
+  }
+  out.bold = weight >= 600 || (selection & 0x20) || contains(sub, "bold") || contains(sub, "black") || contains(sub, "heavy");
+  out.italic = (selection & 1) || contains(sub, "italic") || contains(sub, "oblique");
+  return out;
 }
 
 bool contains(const std::string& s, const char* what) {
@@ -135,7 +207,7 @@ std::string familyOf(const std::string& font) {
   return out;
 }
 
-Piece pieceOf(FPDF_PAGEOBJECT obj, int index, FPDF_TEXTPAGE textPage) {
+Piece pieceOf(FPDF_PAGEOBJECT obj, int index, FPDF_TEXTPAGE textPage, std::map<FPDF_FONT, FontFileNames>& embedded) {
   Piece p;
   p.index = index;
   float l = 0, b = 0, r = 0, t = 0;
@@ -172,6 +244,25 @@ Piece pieceOf(FPDF_PAGEOBJECT obj, int index, FPDF_TEXTPAGE textPage) {
     const int flags = FPDFFont_GetFlags(font);
     p.bold = weight >= 600 || contains(p.font, "bold") || contains(p.font, "black") || contains(p.font, "heavy");
     p.italic = (flags > 0 && (flags & 64)) || contains(p.font, "italic") || contains(p.font, "oblique");
+    // An embedded font's own names and style win: the PDF's can be made up, and a font
+    // descriptor without a weight gets one guessed from its stem width.
+    auto it = embedded.find(font);
+    if (it == embedded.end()) {
+      FontFileNames names;
+      std::size_t fontBytes = 0;
+      if (FPDFFont_GetIsEmbedded(font) == 1 && FPDFFont_GetFontData(font, nullptr, 0, &fontBytes) && fontBytes > 12 &&
+          fontBytes < (64u << 20)) {
+        std::vector<std::uint8_t> data(fontBytes);
+        if (FPDFFont_GetFontData(font, data.data(), fontBytes, &fontBytes)) names = namesInFontFile(data);
+      }
+      it = embedded.emplace(font, names).first;
+    }
+    if (it->second.known) {
+      if (!it->second.postscript.empty()) p.font = it->second.postscript;
+      p.family = it->second.family;
+      p.bold = it->second.bold;
+      p.italic = it->second.italic;
+    }
   }
   unsigned int R = 0, G = 0, B = 0, A = 255;
   if (FPDFPageObj_GetFillColor(obj, &R, &G, &B, &A)) p.color = {std::uint8_t(R), std::uint8_t(G), std::uint8_t(B)};
@@ -228,6 +319,7 @@ std::vector<ContentBlock> Document::contentBlocks(int pageIndex) const {
   if (!page) return out;
   const PageFrame frame = detail::frameOfPage(page);
   FPDF_TEXTPAGE textPage = FPDFText_LoadPage(page);
+  std::map<FPDF_FONT, FontFileNames> embeddedFonts;
   std::vector<Piece> pieces;
   std::vector<ContentBlock> graphics;
   const int n = FPDFPage_CountObjects(page);
@@ -238,7 +330,7 @@ std::vector<ContentBlock> Document::contentBlocks(int pageIndex) const {
     if (!obj || (FPDFPageObj_GetIsActive(obj, &active) && !active)) continue;
     const int type = FPDFPageObj_GetType(obj);
     if (type == FPDF_PAGEOBJ_TEXT) {
-      Piece p = pieceOf(obj, i, textPage);
+      Piece p = pieceOf(obj, i, textPage, embeddedFonts);
       if (std::all_of(p.text.begin(), p.text.end(), isSpace)) continue;  // nothing to see
       pieces.push_back(std::move(p));
       continue;
@@ -491,7 +583,7 @@ std::vector<ContentBlock> Document::contentBlocks(int pageIndex) const {
       TextRun run;
       run.text = detail::toUtf8(runText[k]);
       run.fontName = st.font;
-      run.family = familyOf(st.font);
+      run.family = st.family.empty() ? familyOf(st.font) : st.family;
       run.bold = st.bold;
       run.italic = st.italic;
       run.size = st.size;
@@ -508,7 +600,7 @@ std::vector<ContentBlock> Document::contentBlocks(int pageIndex) const {
     std::sort(blk.tabStops.begin(), blk.tabStops.end());
     blk.text = detail::toUtf8(all);
     blk.fontName = base->font;
-    blk.family = familyOf(base->font);
+    blk.family = base->family.empty() ? familyOf(base->font) : base->family;
     blk.bold = base->bold;
     blk.italic = base->italic;
     blk.fontSize = base->size;
@@ -523,7 +615,7 @@ std::vector<ContentBlock> Document::contentBlocks(int pageIndex) const {
     blk.objects = {p.index};
     blk.text = detail::toUtf8(p.text);
     blk.fontName = p.font;
-    blk.family = familyOf(p.font);
+    blk.family = p.family.empty() ? familyOf(p.font) : p.family;
     blk.fontSize = p.size;
     blk.color = p.color;
     blk.editable = false;

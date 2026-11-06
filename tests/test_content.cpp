@@ -475,6 +475,35 @@ TEST_CASE("a turned page (and one whose box isn't at 0, 0) keeps its drawing whe
   }
 }
 
+TEST_CASE("edits don't leave the page's old fonts and pictures in the file") {
+  // A picture of noise (it doesn't compress) and two lines of text, then the text moved again
+  // and again: each edit reads the page through a copy of its resources, and the copies the
+  // page no longer uses aren't saved.
+  auto doc = page();
+  Document::PageImage img;
+  img.width = img.height = 200;
+  img.bgra.resize(200 * 200 * 4);
+  std::uint32_t seed = 12345;
+  for (auto& b : img.bgra) b = std::uint8_t((seed = seed * 1103515245 + 12345) >> 24);
+  REQUIRE(doc->addContentImage(0, img, {20, 20, 120, 120}));
+  REQUIRE(doc->replaceText(0, {}, lines({"First line"}, 150, 50)));
+  REQUIRE(doc->replaceText(0, {}, lines({"Second line"}, 150, 80)));
+  doc = reopen(*doc);
+  const std::size_t before = doc->saveToMemory().size();
+  for (int k = 0; k < 5; ++k) {
+    const auto blocks = doc->contentBlocks(0);
+    const ContentBlock* t = textBlock(blocks, "First");
+    REQUIRE(t);
+    const auto objects = t->objects;
+    REQUIRE(doc->moveContent(0, objects, 2, 0));
+  }
+  const auto after = doc->saveToMemory();
+  CHECK(after.size() < before + before / 10);
+  auto again = reopen(*doc);
+  CHECK(again->contentBlocks(0).size() == 3);
+  CHECK(ink(*again, {25, 25, 115, 115}) > 1000);
+}
+
 TEST_CASE("a page's drawing as shapes: paths and the outlines of text") {
   auto doc = splitStreams();
   int pictures = -1;

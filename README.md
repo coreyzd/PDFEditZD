@@ -36,7 +36,8 @@ In the **MSYS2 UCRT64** shell:
 
 ```sh
 pacman -S --needed mingw-w64-ucrt-x86_64-toolchain mingw-w64-ucrt-x86_64-cmake \
-    mingw-w64-ucrt-x86_64-ninja mingw-w64-ucrt-x86_64-qt6-base mingw-w64-ucrt-x86_64-qt6-svg
+    mingw-w64-ucrt-x86_64-ninja mingw-w64-ucrt-x86_64-qt6-base mingw-w64-ucrt-x86_64-qt6-svg \
+    mingw-w64-ucrt-x86_64-harfbuzz mingw-w64-ucrt-x86_64-pkgconf
 cd /c/Users/corey.holt/Projects/PDFEditZD
 cmake -S . -B build-win -G Ninja
 cmake --build build-win
@@ -68,7 +69,7 @@ goes wrong.
 # Fedora / Nobara
 sudo dnf install cmake ninja-build gcc-c++ qt6-qtbase-devel qt6-qtsvg-devel
 # Ubuntu / Debian
-sudo apt install cmake ninja-build g++ qt6-base-dev qt6-svg-dev
+sudo apt install cmake ninja-build g++ qt6-base-dev qt6-svg-dev libharfbuzz-dev pkg-config
 
 cmake -S . -B build -G Ninja
 cmake --build build
@@ -153,14 +154,23 @@ on it. Each block's text is kept in runs of one font, size and color. Editing re
 block's objects with new ones, one per run and line, laid out with the matching fonts on the
 computer (Arial, Liberation Sans or the like for Helvetica), so the text wraps where it will
 print. While a block is typed in, its objects are hidden, and the change is one undo step when
-the typing ends. Embedded fonts are added once per document and shared by every edit that
-uses them. A font's file is found by reading the name tables of the installed font files (so
+the typing ends. Text keeps the font it's in: Helvetica, Times and Courier (PDF's own fonts)
+are written as such, any other font (Arial, Georgia, RomanD) is embedded, only the characters
+written (HarfBuzz's subsetter; whole files if it's missing). Embedded fonts are shared by every
+edit that writes the same characters in them. A PDF's font is known by the embedded font's own
+name table when it has one (Microsoft Print to PDF calls its fonts "CIDFont+F1" and gives no
+weight: those are Arial and Arial Bold). A font's file is found by reading the name tables of the installed font files (so
 "Roboto Mono" is found whatever its file or registry entry is called), and a PDF's font name
 ("RobotoMono-Regular", "RomanD") is matched to an installed family. Text in a font without a
 space character (AutoCAD's RomanD) is written word by word, where the spaces put the words. Shapes, pictures and groups of them are moved, scaled, turned and flipped by
 changing their matrices (and their clipping with them). On a page turned by /Rotate (as CAD
 programs often plot drawings) the content is read in the page's own space, not turned upright,
 so nothing else on the page turns when one thing is moved.
+
+PDFium saves every object it has held, used or not, and an edit reads the page through a copy
+of its fonts and pictures, so files grew with every edit. Saving now leaves out the objects
+nothing refers to (the file PDFium wrote is plain enough to go through quickly), so a file
+stays its size however often it's edited.
 
 PDFium rewrites only the content streams that hold changed objects. Word starts some shapes
 (a logo) in one content stream and finishes them in the next, and rewriting one of those

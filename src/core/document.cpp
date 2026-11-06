@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "core/document.hpp"
 
+#include "core/compact.hpp"
 #include "core/engine.hpp"
 
 #include <algorithm>
@@ -594,7 +595,9 @@ bool Document::writeTo(std::vector<std::uint8_t>& out) const {
   flushAppearances();
   out.clear();
   VectorWriter writer(&out);
-  return FPDF_SaveAsCopy(asDoc(doc_), &writer, FPDF_NO_INCREMENTAL) != 0;
+  if (FPDF_SaveAsCopy(asDoc(doc_), &writer, FPDF_NO_INCREMENTAL) == 0) return false;
+  out = withoutUnusedObjects(out);  // PDFium keeps what edits left behind
+  return true;
 }
 
 std::vector<std::uint8_t> Document::saveToMemory() const {
@@ -674,6 +677,7 @@ bool Document::saveFlattened(const std::filesystem::path& path) const {
     if (ok) {
       VectorWriter writer(&bytes);
       ok = FPDF_SaveAsCopy(flat, &writer, FPDF_NO_INCREMENTAL) != 0;
+      if (ok) bytes = withoutUnusedObjects(bytes);
     }
     FPDF_CloseDocument(flat);
     if (!ok) return false;

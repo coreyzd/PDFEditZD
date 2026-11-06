@@ -10,6 +10,10 @@
 #include <QProcess>
 #include <QRawFont>
 #include <QRegularExpression>
+
+#ifdef PDFZ_HAVE_HB_SUBSET
+#include <hb-subset.h>
+#endif
 #include <QSet>
 #include <QSettings>
 
@@ -256,6 +260,37 @@ QFont qtFont(const EditFont& f, double pixelSize) {
 
 namespace {
 
+// Only the glyphs for `text` (and the space), without hinting: a few kilobytes instead of the
+// whole file. The names stay, so the font reads back as itself. The file as it is if it can't.
+QByteArray subsetFor(const QByteArray& file, const QString& text) {
+#ifdef PDFZ_HAVE_HB_SUBSET
+  hb_blob_t* blob = hb_blob_create(file.constData(), static_cast<unsigned>(file.size()), HB_MEMORY_MODE_READONLY, nullptr, nullptr);
+  hb_face_t* face = hb_face_create(blob, 0);
+  hb_blob_destroy(blob);
+  QByteArray out;
+  if (hb_subset_input_t* input = hb_subset_input_create_or_fail()) {
+    hb_set_t* unicodes = hb_subset_input_unicode_set(input);
+    hb_set_add(unicodes, ' ');
+    for (char32_t c : text.toUcs4()) hb_set_add(unicodes, c);
+    hb_subset_input_set_flags(input, HB_SUBSET_FLAGS_NO_HINTING);
+    if (hb_face_t* sub = hb_subset_or_fail(face, input)) {
+      hb_blob_t* result = hb_face_reference_blob(sub);
+      unsigned len = 0;
+      const char* data = hb_blob_get_data(result, &len);
+      if (data && len > 12) out = QByteArray(data, qsizetype(len));
+      hb_blob_destroy(result);
+      hb_face_destroy(sub);
+    }
+    hb_subset_input_destroy(input);
+  }
+  hb_face_destroy(face);
+  if (!out.isEmpty()) return out;
+#else
+  Q_UNUSED(text);
+#endif
+  return file;
+}
+
 // How many of the text's characters the font file has no glyph for.
 int missingGlyphs(const QByteArray& data, const QString& text) {
   const QRawFont raw(data, 12);
@@ -273,7 +308,11 @@ pdfz::TextFont pdfFont(const EditFont& f, const QString& text, bool* complete) {
   pdfz::TextFont out;
   const Standard s = standardOf(f.family);
   const bool latin = pdfz::standardFontCanShow(text.toStdString());
-  if (s != Standard::None && latin) {
+  // Helvetica, Times and Courier themselves are PDF's standard fonts (nothing embedded). Arial,
+  // Times New Roman and Courier New look the same but are themselves: picked, they're embedded,
+  // so the text stays in the font it was given.
+  const bool standardPick = f.family == "Helvetica" || f.family == "Times" || f.family == "Courier";
+  if (standardPick && latin) {
     out.standard = standardName(s, f.bold, f.italic).toStdString();
     return out;
   }
@@ -302,8 +341,14 @@ pdfz::TextFont pdfFont(const EditFont& f, const QString& text, bool* complete) {
     }
   }
   if (!best.isEmpty()) {
-    out.file.assign(best.begin(), best.end());
-    out.key = bestFile.toStdString();
+    const QByteArray sub = subsetFor(best, text);
+    out.file.assign(sub.begin(), sub.end());
+    // The same characters of the same file share one embedded font in a document.
+    QList<uint> chars = text.toUcs4();
+    std::sort(chars.begin(), chars.end());
+    chars.erase(std::unique(chars.begin(), chars.end()), chars.end());
+    const QString set = sub.size() == best.size() ? QString() : QString::fromUcs4(reinterpret_cast<const char32_t*>(chars.constData()), chars.size());
+    out.key = (bestFile + QLatin1Char('#') + QString::number(qHash(set), 16)).toStdString();
     if (complete) *complete = bestMissing == 0;
     return out;
   }
