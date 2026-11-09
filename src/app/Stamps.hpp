@@ -17,6 +17,10 @@ struct StampStyle {
   QString title;    // "APPROVED"
   QColor color;
   bool dynamic = false;  // adds "By <name> at <time>, <date>"
+  // Banner: the title in a rounded frame (Acrobat's). DateBox: like an office rubber date
+  // stamp: the title over a box with today's date (the day in bold), the name under it.
+  enum class Layout { Banner, DateBox };
+  Layout layout = Layout::Banner;
 };
 
 QList<StampStyle> standardStamps();

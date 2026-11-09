@@ -3,7 +3,9 @@
 
 #include "Markup.hpp"
 
+#include <QDate>
 #include <QDateTime>
+#include <QTransform>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -24,6 +26,8 @@ QList<StampStyle> standardStamps() {
   return {
       {QObject::tr("APPROVED"), green, true},     {QObject::tr("REVIEWED"), blue, true},
       {QObject::tr("RECEIVED"), blue, true},      {QObject::tr("REVISED"), blue, true},
+      // An office date stamp: department, date, name.
+      {QObject::tr("DRAFTING"), QColor(0xD8, 0x2A, 0x3C), true, StampStyle::Layout::DateBox},
       {QObject::tr("NOT APPROVED"), red, false},  {QObject::tr("DRAFT"), blue, false},
       {QObject::tr("FINAL"), green, false},       {QObject::tr("COMPLETED"), green, false},
       {QObject::tr("CONFIDENTIAL"), red, false},  {QObject::tr("FOR COMMENT"), blue, false},
@@ -60,7 +64,67 @@ QImage previewOf(const QPainterPath& path, const QColor& color, const QSizeF& bo
 
 }  // namespace
 
+namespace {
+
+// `text` as outlines, its capitals `cap` high and `xscale` of its width (less than 1 only to
+// fit), centered on `centerX` with its baseline at `baseline`.
+QPainterPath fitted(const QString& text, bool bold, double cap, double xscale, double centerX, double baseline) {
+  QFont f = stampFont(100, bold);
+  const double capRatio = QFontMetricsF(f).capHeight() / 100;
+  f = stampFont(cap / (capRatio > 0.3 ? capRatio : 0.716), bold);
+  QPainterPath p;
+  p.addText(0, 0, f, text);
+  const double w = QFontMetricsF(f).horizontalAdvance(text) * xscale;
+  QTransform t;
+  t.translate(centerX - w / 2, baseline);
+  t.scale(xscale, 1);
+  return t.map(p);
+}
+
+// Like the date stamps on office desks: a thin frame, the title (a department) at the top, the
+// date in a box in the middle, and the name at the bottom. 113 x 68 points, laid out in tenths
+// of a point.
+MadeStamp makeDateStamp(const StampStyle& style, const QString& author) {
+  const double W = 1130, H = 680, line = 8;
+  const QDate today = QDate::currentDate();
+  QPainterPath all;
+  all.setFillRule(Qt::WindingFill);
+  QPainterPath frames;
+  frames.addRect(QRectF(line / 2, line / 2, W - line, H - line));
+  frames.addRect(QRectF(108 + line / 2, 144 + line / 2, 900 - line, 392 - line));
+  QPainterPathStroker stroker;
+  stroker.setWidth(line);
+  stroker.setJoinStyle(Qt::MiterJoin);
+  all.addPath(stroker.createStroke(frames));
+  auto add = [&](const QString& text, bool bold, double cap, double xscale, double cx, double base, double maxW) {
+    QFont f = stampFont(100, bold);
+    const double natural = QFontMetricsF(f).horizontalAdvance(text) * cap / std::max(1.0, QFontMetricsF(f).capHeight());
+    if (natural * xscale > maxW && natural > 0) xscale = maxW / natural;  // a long name: narrower, to fit
+    all.addPath(fitted(text, bold, cap, xscale, cx, base));
+  };
+  // Helvetica throughout, as the other stamps; the title and the name the same size and as far
+  // from the date's box (2 pt), and as far from the frame.
+  add(style.title, false, 78, 1.0, W / 2, 124, W - 120);
+  const QString date = QLocale().toString(today, QStringLiteral("MMM")).toUpper() + QLatin1Char(' ') +
+                       today.toString(QStringLiteral("dd yyyy"));
+  add(date, false, 90, 1.0, W / 2, 340 + 45, 900 - 100);  // in the middle of the box
+  const QString name = (author.isEmpty() ? QObject::tr("(unknown)") : author).toUpper();
+  add(name, false, 78, 1.0, W / 2, 634, W - 100);
+
+  MadeStamp out;
+  out.drawing.width = W;
+  out.drawing.height = H;
+  out.drawing.paths.push_back(stampPath(all, style.color));
+  out.width = W / 10;
+  out.height = H / 10;
+  out.preview = previewOf(all, style.color, QSizeF(160, 160 * H / W));
+  return out;
+}
+
+}  // namespace
+
 MadeStamp makeStamp(const StampStyle& style, const QString& author) {
+  if (style.layout == StampStyle::Layout::DateBox) return makeDateStamp(style, author);
   // Laid out in units of 1/10 point: a 16 pt title in a frame, and a 6 pt line under it.
   const double title = 160, subSize = 62, padX = 60, padY = 36, gap = 14, frame = 24, radius = 60;
   QPainterPath text;

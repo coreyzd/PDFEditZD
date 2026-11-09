@@ -2478,15 +2478,16 @@ void MainWindow::splitDocument() {
 void MainWindow::fillStampMenu(QMenu* menu) {
   menu->clear();
   const QStringList favorites = StampFavorites::load();
+  // A banner fits a short row; a taller stamp (a date stamp) gets a taller one.
   auto addRow = [this](QMenu* into, const QImage& preview, const QString& tip, const QString& key,
-                       std::function<void()> act) {
+                       std::function<void()> act, int rowH = 34) {
     auto* row = new QWidget(into);
     auto* lay = new QHBoxLayout(row);
     lay->setContentsMargins(2, 0, 2, 0);
     lay->setSpacing(2);
     auto* button = new QToolButton(row);
     button->setAutoRaise(true);
-    const QSize box(160, 34);
+    const QSize box(160, rowH);
     QImage fitted(box * 2, QImage::Format_ARGB32_Premultiplied);
     fitted.setDevicePixelRatio(2);
     fitted.fill(Qt::transparent);
@@ -2537,7 +2538,8 @@ void MainWindow::fillStampMenu(QMenu* menu) {
   auto addStandard = [&](QMenu* into, const StampStyle& st) {
     const MadeStamp made = makeStamp(st, author);
     addRow(into, made.preview, st.title, StampFavorites::standardKey(st),
-           [this, st, author] { placeStamp(makeStamp(st, author), st.title); });
+           [this, st, author] { placeStamp(makeStamp(st, author), st.title); },
+           st.layout == StampStyle::Layout::DateBox ? 64 : 34);
   };
   auto addCustom = [&](QMenu* into, const CustomStamps::Entry& c) {
     const MadeStamp made = c.made();
