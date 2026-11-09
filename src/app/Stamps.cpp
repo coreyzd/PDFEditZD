@@ -28,12 +28,10 @@ QList<StampStyle> standardStamps() {
       {QObject::tr("RECEIVED"), blue, true},      {QObject::tr("REVISED"), blue, true},
       // An office date stamp: department, date, name.
       {QObject::tr("DRAFTING"), QColor(0xD8, 0x2A, 0x3C), true, StampStyle::Layout::DateBox},
-      {QObject::tr("NOT APPROVED"), red, false},  {QObject::tr("DRAFT"), blue, false},
-      {QObject::tr("FINAL"), green, false},       {QObject::tr("COMPLETED"), green, false},
+      {QObject::tr("NOT APPROVED"), red, false},  {QObject::tr("PRELIMINARY"), blue, false},
       {QObject::tr("CONFIDENTIAL"), red, false},  {QObject::tr("FOR COMMENT"), blue, false},
-      {QObject::tr("FOR PUBLIC RELEASE"), green, false}, {QObject::tr("NOT FOR PUBLIC RELEASE"), red, false},
-      {QObject::tr("PRELIMINARY RESULTS"), blue, false}, {QObject::tr("INFORMATION ONLY"), blue, false},
-      {QObject::tr("VOID"), red, false},
+      {QObject::tr("INFORMATION ONLY"), blue, false}, {QObject::tr("REFERENCE"), red, false},
+      {QObject::tr("OBSOLETE"), red, false},      {QObject::tr("VOID"), red, false},
   };
 }
 
@@ -258,7 +256,7 @@ QString StampFavorites::standardKey(const StampStyle& style) { return QStringLit
 QStringList StampFavorites::load() {
   const QSettings s;
   if (!s.contains("stamps/favorites"))
-    return {QStringLiteral("std:APPROVED"), QStringLiteral("std:REVIEWED"), QStringLiteral("std:DRAFT"),
+    return {QStringLiteral("std:APPROVED"), QStringLiteral("std:REVIEWED"), QStringLiteral("std:PRELIMINARY"),
             QStringLiteral("std:CONFIDENTIAL")};
   return s.value("stamps/favorites").toStringList();
 }
