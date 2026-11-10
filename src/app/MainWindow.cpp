@@ -309,7 +309,9 @@ void MainWindow::connectTab(DocumentTab* t) {
     updateClipboardActions();
   });
   connect(v, &DocumentView::annotationSelectionChanged, this, [this, t] {
-    if (t == tab()) updateStyleControls();
+    if (t != tab()) return;
+    updateStyleControls();
+    updateClipboardActions();
   });
   connect(v, &DocumentView::contextMenuRequested, this,
           [this, t](const QPoint& pos, int page, int index) { showViewMenu(t, pos, page, index); });
@@ -464,14 +466,22 @@ void MainWindow::createActions() {
   cutAct_ = new QAction(themeIcon("edit-cut"), tr("Cu&t"), this);
   cutAct_->setShortcut(QKeySequence::Cut);
   connect(cutAct_, &QAction::triggered, this, [this] {
-    if (DocumentTab* t = tab()) t->copyContent(true);
+    DocumentTab* t = tab();
+    if (!t) return;
+    if (editAct_->isChecked() && t->view()->hasContentSelection()) t->copyContent(true);
+    else t->copyAnnotation(true);
   });
   pasteAct_ = new QAction(themeIcon("edit-paste"), tr("&Paste"), this);
   pasteAct_->setShortcut(QKeySequence::Paste);
-  pasteAct_->setToolTip(tr("Paste: what was copied with Edit PDF goes where it was on its page"));
+  pasteAct_->setToolTip(tr("Paste: a stamp or comment, or what was copied with Edit PDF, goes where it was on its page"));
   connect(pasteAct_, &QAction::triggered, this, [this] {
     DocumentTab* t = tab();
     if (!t || !t->hasDocument()) return;
+    if (DocumentTab::hasAnnotationsToPaste()) {  // a stamp or comment: not Edit PDF's
+      if (editAct_->isChecked()) editAct_->trigger();
+      if (!t->pasteAnnotations(t->view()->currentPage())) statusBar()->showMessage(tr("Nothing to paste"), 3000);
+      return;
+    }
     if (!editAct_->isChecked()) editAct_->trigger();
     if (!t->pasteContent(t->view()->currentPage())) statusBar()->showMessage(tr("Nothing to paste"), 3000);
   });
@@ -1558,6 +1568,7 @@ void MainWindow::copySelection() {
     t->copyContent(false);
     return;
   }
+  if (!editAct_->isChecked() && t->copyAnnotation(false)) return;  // the selected stamp or comment
   const QString text = t->view()->selectedText();
   if (text.isEmpty()) return;
   QGuiApplication::clipboard()->setText(text);
@@ -1855,8 +1866,9 @@ void MainWindow::updateClipboardActions() {
   DocumentTab* t = tab();
   const bool has = t && t->hasDocument();
   const bool content = has && editAct_->isChecked() && t->view()->hasContentSelection() && !t->view()->isEditingContent();
-  copyAct_->setEnabled(content || (has && t->view()->hasSelection()));
-  cutAct_->setEnabled(content);
+  const bool annot = has && !editAct_->isChecked() && t->canCopyAnnotation();
+  copyAct_->setEnabled(content || annot || (has && t->view()->hasSelection()));
+  cutAct_->setEnabled(content || annot);
   deleteContentAct_->setEnabled(content);
   for (QAction* a : arrangeActs_) a->setEnabled(content);
   pasteAct_->setEnabled(has && DocumentTab::canPaste());
@@ -2007,10 +2019,17 @@ void MainWindow::showViewMenu(DocumentTab* t, const QPoint& globalPos, int page,
       menu.addAction(largerAct_);
     }
     menu.addSeparator();
+    updateClipboardActions();
+    if (cutAct_->isEnabled()) {
+      menu.addAction(cutAct_);
+      menu.addAction(copyAct_);
+    }
+    if (pasteAct_->isEnabled()) menu.addAction(pasteAct_);
     menu.addAction(a && a->kind == pdfz::AnnotKind::Stamp ? tr("Delete") : tr("Delete Comment"), this,
                    [=] { t->deleteAnnotation(page, annotIndex); });
   } else {
     menu.addAction(copyAct_);
+    if (DocumentTab::hasAnnotationsToPaste()) menu.addAction(pasteAct_);  // a copied stamp or comment
     menu.addSeparator();
     menu.addAction(highlightSelAct_);
     menu.addAction(underlineSelAct_);
@@ -2543,7 +2562,7 @@ void MainWindow::fillStampMenu(QMenu* menu) {
   };
   auto addCustom = [&](QMenu* into, const CustomStamps::Entry& c) {
     const MadeStamp made = c.made();
-    addRow(into, made.preview, tr("Your stamp"), c.key(), [this, c] { placeStamp(c.made(), tr("Stamp")); });
+    addRow(into, made.preview, c.label, c.key(), [this, c] { placeStamp(c.made(), c.label); });
   };
 
   // Favorites, in the order they were picked.
@@ -2572,12 +2591,24 @@ void MainWindow::fillStampMenu(QMenu* menu) {
   if (!custom.isEmpty()) customMenu->addSeparator();
   customMenu->addAction(tr("Add a Stamp from a File…"), this, &MainWindow::addStampFromFile);
   if (!custom.isEmpty()) {
+    QMenu* rename = customMenu->addMenu(tr("Rename a Stamp of Yours"));
     QMenu* remove = customMenu->addMenu(tr("Remove a Stamp of Yours"));
     for (const auto& c : custom) {
-      const QImage icon = c.art.isEmpty() ? c.image.scaled(64, 32, Qt::KeepAspectRatio, Qt::SmoothTransformation)
-                                          : c.art.preview(QSize(64, 32), devicePixelRatioF());
-      QAction* a = remove->addAction(QIcon(QPixmap::fromImage(icon)), tr("Stamp"), this,
-                                     [path = c.path] { CustomStamps::remove(path); });
+      const QIcon icon(QPixmap::fromImage(c.art.isEmpty()
+                                              ? c.image.scaled(64, 32, Qt::KeepAspectRatio, Qt::SmoothTransformation)
+                                              : c.art.preview(QSize(64, 32), devicePixelRatioF())));
+      QAction* r = rename->addAction(icon, c.label + QStringLiteral("…"), this, [this, c] {
+        bool ok = false;
+        const QString name = QInputDialog::getText(this, tr("Rename Stamp"), tr("Stamp name:"), QLineEdit::Normal,
+                                                   c.name.isEmpty() ? c.label : c.name, &ok);
+        if (ok && !name.trimmed().isEmpty()) CustomStamps::rename(c.path, name);
+      });
+      r->setIconVisibleInMenu(true);
+      QAction* a = remove->addAction(icon, c.label, this, [this, c] {
+        if (QMessageBox::question(this, tr("Remove a Stamp of Yours"), tr("Remove the stamp \u201c%1\u201d?").arg(c.label)) ==
+            QMessageBox::Yes)
+          CustomStamps::remove(c.path);
+      });
       a->setIconVisibleInMenu(true);
     }
   }
@@ -2594,14 +2625,24 @@ void MainWindow::addStampFromFile() {
       this, tr("Stamp File"), lastDir(),
       tr("Drawings and pictures (%1);;Drawings (%2);;All files (*)").arg(patterns.join(' '), vectorPatterns().join(' ')));
   if (path.isEmpty()) return;
+  // A name for it, to find it by in the menus (the file's, unless another is given).
+  QString name;
+  auto askName = [&] {
+    bool ok = false;
+    name = QInputDialog::getText(this, tr("Add a Stamp"), tr("Stamp name:"), QLineEdit::Normal,
+                                 QFileInfo(path).completeBaseName(), &ok).trimmed();
+    if (name.isEmpty()) name = QFileInfo(path).completeBaseName();
+    return ok;
+  };
   if (isVectorFile(path)) {
     QString error;
     bool pictures = false;
     const VectorArt art = readVectorFile(path, &error, &pictures).normalized();
     if (!art.isEmpty()) {
-      CustomStamps::add(art);
+      if (!askName()) return;
+      CustomStamps::add(art, name);
       if (pictures) statusBar()->showMessage(tr("Pictures in the file aren't part of the stamp, only what's drawn."), 6000);
-      placeStamp(makeVectorStamp(art), tr("Stamp"));
+      placeStamp(makeVectorStamp(art), name);
       return;
     }
     // Nothing drawn in it (a scan saved as a PDF): it's a picture after all.
@@ -2610,8 +2651,9 @@ void MainWindow::addStampFromFile() {
       QMessageBox::warning(this, tr("Stamp"), error.isEmpty() ? tr("Nothing to use was found in that file.") : error);
       return;
     }
-    CustomStamps::add(img);
-    placeStamp(makeImageStamp(img), tr("Stamp"));
+    if (!askName()) return;
+    CustomStamps::add(img, name);
+    placeStamp(makeImageStamp(img), name);
     return;
   }
   QImageReader reader(path);
@@ -2621,8 +2663,9 @@ void MainWindow::addStampFromFile() {
     QMessageBox::warning(this, tr("Stamp"), tr("That picture couldn't be read."));
     return;
   }
-  CustomStamps::add(img);
-  placeStamp(makeImageStamp(img), tr("Stamp"));
+  if (!askName()) return;
+  CustomStamps::add(img, name);
+  placeStamp(makeImageStamp(img), name);
 }
 
 void MainWindow::placeStamp(const MadeStamp& stamp, const QString& subject) {

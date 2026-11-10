@@ -80,6 +80,17 @@ public:
   void setFieldChecked(int page, int index, bool checked);
   void setFieldChoice(int page, int index, int option);
 
+  // Copying a comment or stamp (the selected one): to the clipboard with its size, place and
+  // look, to paste on any page of any document; cutting deletes it too. False if nothing's
+  // selected that copies this way (text markups don't).
+  bool canCopyAnnotation();
+  bool copyAnnotation(bool cut);
+  // The clipboard's comment or stamp onto `page`, where it was on its page (moved in from past
+  // a smaller page's edge; a little down and right of one just like it), then selected. False if
+  // the clipboard has none.
+  bool pasteAnnotations(int page);
+  static bool hasAnnotationsToPaste();
+
   // Edit PDF: a picture added to the page's content, filling `rect` (display frame); it's then
   // selected.
   void addContentImage(int page, const pdfz::Document::PageImage& image, const pdfz::RectF& rect);

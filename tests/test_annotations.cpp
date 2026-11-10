@@ -400,10 +400,10 @@ TEST_CASE("restyling a text box after it's made: opacity and fill stick") {
   CHECK(countColor(*saved, {30, 30, 200, 70}, {255, 255, 64}, 30) > 3000);
 }
 
-TEST_CASE("stamps: drawn outlines and an image, moved and resized") {
-  auto doc = blank(300, 400);
-  // A drawing 100 x 50: a filled square at its right end (75..95 x 15..35), and an image of the
-  // whole box that is clear except for a blue middle third.
+namespace {
+// A drawing 100 x 50: a filled square at its right end (75..95 x 15..35), and an image of the
+// whole box that is clear except for a blue middle third.
+pdfz::StampDrawing testDrawing() {
   pdfz::StampDrawing d;
   d.width = 100;
   d.height = 50;
@@ -422,6 +422,23 @@ TEST_CASE("stamps: drawn outlines and an image, moved and resized") {
       px[0] = 255;
       px[3] = 255;
     }
+  return d;
+}
+
+// The test drawing shown in `r`: the square, the blue band, and nothing (clear image) on the left.
+void checkTestDrawing(const Document& dd, const RectF& r) {
+  auto at = [&](double fx, double fy) { return RectF{r.left + fx * r.width() - 2, r.top + fy * r.height() - 2,
+                                                     r.left + fx * r.width() + 2, r.top + fy * r.height() + 2}; };
+  CHECK(countColor(dd, at(0.85, 0.5), {0, 160, 0}, 40) >= 9);
+  CHECK(countColor(dd, at(0.5, 0.5), {0, 0, 255}, 40) >= 9);
+  CHECK(countColor(dd, at(0.15, 0.5), {255, 255, 255}, 10) >= 9);
+  CHECK(countColor(dd, at(0.85, 0.15), {255, 255, 255}, 10) >= 9);  // above the square: clear
+}
+}  // namespace
+
+TEST_CASE("stamps: drawn outlines and an image, moved and resized") {
+  auto doc = blank(300, 400);
+  const pdfz::StampDrawing d = testDrawing();
   Annotation a;
   a.kind = AnnotKind::Stamp;
   a.subject = "Signature";
@@ -429,14 +446,7 @@ TEST_CASE("stamps: drawn outlines and an image, moved and resized") {
   a.rect = {50, 100, 150, 150};
   const int index = doc->addStamp(0, a, d);
   REQUIRE(index == 0);
-  auto check = [&](const Document& dd, const RectF& r) {
-    // The square, the blue band, and nothing (clear image) on the left.
-    auto at = [&](double fx, double fy) { return RectF{r.left + fx * r.width() - 2, r.top + fy * r.height() - 2,
-                                                       r.left + fx * r.width() + 2, r.top + fy * r.height() + 2}; };
-    CHECK(countColor(dd, at(0.85, 0.5), {0, 160, 0}, 40) >= 9);
-    CHECK(countColor(dd, at(0.5, 0.5), {0, 0, 255}, 40) >= 9);
-    CHECK(countColor(dd, at(0.15, 0.5), {255, 255, 255}, 10) >= 9);
-  };
+  auto check = [](const Document& dd, const RectF& r) { checkTestDrawing(dd, r); };
   check(*doc, a.rect);
   auto saved = reopen(*doc);
   check(*saved, a.rect);
@@ -454,6 +464,64 @@ TEST_CASE("stamps: drawn outlines and an image, moved and resized") {
   REQUIRE(saved->updateAnnotation(0, 0, b) == 0);
   check(*saved, b.rect);
   check(*reopen(*saved), b.rect);
+}
+
+TEST_CASE("stamps: the drawing read back, after a move and resize, copies to another document") {
+  for (int rot : {0, 90, 270}) {
+    CAPTURE(rot);
+    auto doc = blank(300, 400, rot, true);
+    Annotation a;
+    a.kind = AnnotKind::Stamp;
+    a.subject = "APPROVED";
+    a.author = "Corey";
+    a.color = {30, 123, 52};
+    a.rect = {40, 60, 140, 110};
+    REQUIRE(doc->addStamp(0, a, testDrawing()) == 0);
+    auto saved = reopen(*doc);
+    REQUIRE(saved->moveAnnotation(0, 0, 15, 25));
+    Annotation b = saved->annotations(0).at(0);
+    b.rect = {b.rect.left, b.rect.top, b.rect.left + 150, b.rect.top + 75};  // 1.5 times the size
+    REQUIRE(saved->updateAnnotation(0, 0, b) == 0);
+    saved = reopen(*saved);
+    b = saved->annotations(0).at(0);
+    CHECK(nearRect(b.rect, {55, 85, 205, 160}));
+
+    pdfz::StampDrawing got;
+    REQUIRE(saved->stampDrawing(0, 0, got));
+    CHECK(std::abs(got.width / got.height - 2.0) < 0.01);
+    CHECK(got.paths.size() == 1);
+    CHECK(got.paths.at(0).color == Color{0, 160, 0});
+    CHECK(got.imageWidth == 30);
+    CHECK(got.imageHeight == 15);
+
+    // Pasted on an upright page of another document, at its size and place: the same look.
+    for (int to : {0, 90}) {
+      CAPTURE(to);
+      auto other = blank(300, 400, to);
+      REQUIRE(other->addStamp(0, b, got) == 0);
+      checkTestDrawing(*other, b.rect);
+      auto again = reopen(*other);
+      checkTestDrawing(*again, b.rect);
+      CHECK(nearRect(again->annotations(0).at(0).rect, b.rect));
+      CHECK(again->annotations(0).at(0).subject == "APPROVED");
+      // And copied again from there: still the same.
+      pdfz::StampDrawing twice;
+      REQUIRE(again->stampDrawing(0, 0, twice));
+      CHECK(twice.paths.size() == 1);
+      CHECK(std::abs(twice.width / twice.height - 2.0) < 0.01);
+    }
+  }
+}
+
+TEST_CASE("stamps: one drawn some other way isn't read back") {
+  auto doc = blank();
+  Annotation sq;
+  sq.kind = AnnotKind::Square;
+  sq.rect = {20, 20, 120, 120};
+  REQUIRE(doc->addAnnotation(0, sq) == 0);
+  pdfz::StampDrawing got;
+  CHECK_FALSE(doc->stampDrawing(0, 0, got));
+  CHECK_FALSE(doc->stampDrawing(0, 5, got));
 }
 
 TEST_CASE("hiding an annotation while it's edited") {

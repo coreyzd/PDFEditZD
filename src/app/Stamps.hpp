@@ -41,12 +41,16 @@ struct Entry {
   QString path;
   QImage image;   // a picture
   VectorArt art;  // or a drawing
+  QString name;   // as given (empty if none was)
+  QString label;  // the name, or "Stamp 2" for one without
   QString key() const;  // for favorites
   MadeStamp made() const;
 };
 QList<Entry> load();
-bool add(const QImage& image);
-bool add(const VectorArt& art);
+// Saved with its name: the stamp's path, or empty if it couldn't be saved.
+QString add(const QImage& image, const QString& name);
+QString add(const VectorArt& art, const QString& name);
+void rename(const QString& path, const QString& name);
 void remove(const QString& path);
 }  // namespace CustomStamps
 

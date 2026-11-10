@@ -13,7 +13,11 @@
 #include "core/document.hpp"
 
 #include <QApplication>
+#include <QBuffer>
 #include <QClipboard>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QMimeData>
 #include <QDir>
 #include <QFileInfo>
@@ -21,6 +25,7 @@
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <cstring>
 #include <filesystem>
 
 DocumentTab::DocumentTab(QWidget* parent) : QWidget(parent) {
@@ -633,7 +638,256 @@ void DocumentTab::onContentEditFinished(TextEditing e, RichText text) {
 
 namespace {
 const char* const kContentMime = "application/x-pdfeditzd-content";
+// A comment or stamp, as JSON: its fields, and a stamp's drawing (its shapes, and its picture
+// as a PNG). It pastes at the same size and place, on any page of any document.
+const char* const kAnnotMime = "application/x-pdfeditzd-annotations";
+
+QJsonArray toJson(const pdfz::Color& c) { return {c.r, c.g, c.b}; }
+pdfz::Color colorFrom(const QJsonValue& v) {
+  const QJsonArray a = v.toArray();
+  auto at = [&](int i) { return std::uint8_t(std::clamp(a.at(i).toInt(), 0, 255)); };
+  return a.size() == 3 ? pdfz::Color{at(0), at(1), at(2)} : pdfz::Color{};
+}
+QJsonArray toJson(const pdfz::RectF& r) { return {r.left, r.top, r.right, r.bottom}; }
+pdfz::RectF rectFrom(const QJsonValue& v) {
+  const QJsonArray a = v.toArray();
+  return a.size() == 4 ? pdfz::RectF{a[0].toDouble(), a[1].toDouble(), a[2].toDouble(), a[3].toDouble()} : pdfz::RectF{};
+}
+
+QJsonObject toJson(const pdfz::Annotation& a, const pdfz::StampDrawing* drawing) {
+  QJsonObject o;
+  o["kind"] = int(a.kind);
+  o["rect"] = toJson(a.rect);
+  o["color"] = toJson(a.color);
+  o["hasFill"] = a.hasFill;
+  o["fill"] = toJson(a.fill);
+  o["opacity"] = a.opacity;
+  o["borderWidth"] = a.borderWidth;
+  QJsonArray ink;
+  for (const auto& stroke : a.ink) {
+    QJsonArray s;
+    for (const pdfz::PointF& p : stroke) s.append(QJsonArray{p.x, p.y});
+    ink.append(s);
+  }
+  o["ink"] = ink;
+  o["fontSize"] = a.fontSize;
+  o["fontName"] = QString::fromStdString(a.fontName);
+  o["textColor"] = toJson(a.textColor);
+  o["align"] = a.align;
+  o["contents"] = QString::fromStdString(a.contents);
+  o["author"] = QString::fromStdString(a.author);
+  o["subject"] = QString::fromStdString(a.subject);
+  if (drawing) {
+    QJsonObject d;
+    d["width"] = drawing->width;
+    d["height"] = drawing->height;
+    QJsonArray paths;
+    for (const pdfz::StampDrawing::Path& path : drawing->paths) {
+      QJsonArray ops;
+      for (const pdfz::StampDrawing::Op& op : path.ops) {
+        QJsonArray j{int(op.kind)};
+        const int points = op.kind == pdfz::StampDrawing::Op::CubicTo ? 3 : op.kind == pdfz::StampDrawing::Op::Close ? 0 : 1;
+        for (int i = 0; i < points; ++i) {
+          j.append(op.p[i].x);
+          j.append(op.p[i].y);
+        }
+        ops.append(j);
+      }
+      paths.append(QJsonObject{{"color", toJson(path.color)}, {"evenOdd", path.evenOdd}, {"ops", ops}});
+    }
+    d["paths"] = paths;
+    if (drawing->imageWidth > 0 && drawing->imageHeight > 0 &&
+        drawing->imageBgra.size() == std::size_t(drawing->imageWidth) * drawing->imageHeight * 4) {
+      // ARGB32 is BGRA in memory, with straight alpha: the drawing's own layout.
+      QImage img(drawing->imageWidth, drawing->imageHeight, QImage::Format_ARGB32);
+      for (int y = 0; y < img.height(); ++y)
+        std::memcpy(img.scanLine(y), drawing->imageBgra.data() + std::size_t(y) * img.width() * 4, std::size_t(img.width()) * 4);
+      QByteArray png;
+      QBuffer buf(&png);
+      buf.open(QIODevice::WriteOnly);
+      img.save(&buf, "PNG");
+      d["image"] = QString::fromLatin1(png.toBase64());
+    }
+    o["drawing"] = d;
+  }
+  return o;
+}
+
+bool fromJson(const QJsonObject& o, pdfz::Annotation& a, pdfz::StampDrawing& drawing, bool& hasDrawing) {
+  const int kind = o["kind"].toInt(-1);
+  if (kind < 0 || kind > int(pdfz::AnnotKind::Other)) return false;
+  a = {};
+  a.kind = pdfz::AnnotKind(kind);
+  a.rect = rectFrom(o["rect"]);
+  if (a.rect.empty()) return false;
+  a.color = colorFrom(o["color"]);
+  a.hasFill = o["hasFill"].toBool();
+  a.fill = colorFrom(o["fill"]);
+  a.opacity = std::clamp(o["opacity"].toDouble(1), 0.0, 1.0);
+  a.borderWidth = std::max(0.0, o["borderWidth"].toDouble(1));
+  for (const QJsonValue& s : o["ink"].toArray()) {
+    std::vector<pdfz::PointF> stroke;
+    for (const QJsonValue& p : s.toArray()) stroke.push_back({p.toArray().at(0).toDouble(), p.toArray().at(1).toDouble()});
+    if (!stroke.empty()) a.ink.push_back(std::move(stroke));
+  }
+  a.fontSize = o["fontSize"].toDouble(12);
+  a.fontName = o["fontName"].toString("Helv").toStdString();
+  a.textColor = colorFrom(o["textColor"]);
+  a.align = std::clamp(o["align"].toInt(), 0, 2);
+  a.contents = o["contents"].toString().toStdString();
+  a.author = o["author"].toString().toStdString();
+  a.subject = o["subject"].toString().toStdString();
+  hasDrawing = o.contains("drawing");
+  if (!hasDrawing) return true;
+  const QJsonObject d = o["drawing"].toObject();
+  drawing = {};
+  drawing.width = d["width"].toDouble(1);
+  drawing.height = d["height"].toDouble(1);
+  if (!(drawing.width > 0) || !(drawing.height > 0)) return false;
+  for (const QJsonValue& pv : d["paths"].toArray()) {
+    const QJsonObject po = pv.toObject();
+    pdfz::StampDrawing::Path path;
+    path.color = colorFrom(po["color"]);
+    path.evenOdd = po["evenOdd"].toBool();
+    for (const QJsonValue& ov : po["ops"].toArray()) {
+      const QJsonArray j = ov.toArray();
+      const int k = j.at(0).toInt(-1);
+      if (k < 0 || k > int(pdfz::StampDrawing::Op::Close)) return false;
+      pdfz::StampDrawing::Op op;
+      op.kind = pdfz::StampDrawing::Op::Kind(k);
+      const int points = op.kind == pdfz::StampDrawing::Op::CubicTo ? 3 : op.kind == pdfz::StampDrawing::Op::Close ? 0 : 1;
+      if (j.size() != 1 + 2 * points) return false;
+      for (int i = 0; i < points; ++i) op.p[i] = {j[1 + 2 * i].toDouble(), j[2 + 2 * i].toDouble()};
+      path.ops.push_back(op);
+    }
+    drawing.paths.push_back(std::move(path));
+  }
+  if (d.contains("image")) {
+    QImage img;
+    if (!img.loadFromData(QByteArray::fromBase64(d["image"].toString().toLatin1()), "PNG")) return false;
+    img = img.convertToFormat(QImage::Format_ARGB32);
+    drawing.imageWidth = img.width();
+    drawing.imageHeight = img.height();
+    drawing.imageBgra.resize(std::size_t(img.width()) * img.height() * 4);
+    for (int y = 0; y < img.height(); ++y)
+      std::memcpy(drawing.imageBgra.data() + std::size_t(y) * img.width() * 4, img.constScanLine(y), std::size_t(img.width()) * 4);
+  }
+  return !drawing.paths.empty() || !drawing.imageBgra.empty();
+}
+
+// Comments that copy as themselves: not the text markups (they belong to the text under them).
+bool copiesAsFields(pdfz::AnnotKind k) {
+  switch (k) {
+    case pdfz::AnnotKind::Note: case pdfz::AnnotKind::FreeText: case pdfz::AnnotKind::Ink:
+    case pdfz::AnnotKind::Square: case pdfz::AnnotKind::Circle: case pdfz::AnnotKind::Line:
+      return true;
+    default:
+      return false;
+  }
+}
 }  // namespace
+
+bool DocumentTab::canCopyAnnotation() {
+  int page, index;
+  if (!doc_ || !view_->selectedAnnotation(page, index)) return false;
+  const pdfz::Annotation* a = annotation(page, index);
+  return a && (a->kind == pdfz::AnnotKind::Stamp || copiesAsFields(a->kind));
+}
+
+bool DocumentTab::copyAnnotation(bool cut) {
+  int page, index;
+  if (!doc_ || !view_->selectedAnnotation(page, index)) return false;
+  finishTextEditing();
+  const pdfz::Annotation* found = annotation(page, index);
+  if (!found) return false;
+  const pdfz::Annotation a = *found;
+  pdfz::StampDrawing drawing;
+  if (a.kind == pdfz::AnnotKind::Stamp) {
+    if (!doc_->stampDrawing(page, index, drawing)) {
+      emit statusMessage(tr("This stamp was made by another program and can't be copied."), 4000);
+      return true;  // handled: nothing else to copy
+    }
+  } else if (!copiesAsFields(a.kind)) {
+    return false;
+  }
+  const QJsonObject o{{"version", 1}, {"annotations", QJsonArray{toJson(a, a.kind == pdfz::AnnotKind::Stamp ? &drawing : nullptr)}}};
+  auto* mime = new QMimeData;
+  mime->setData(kAnnotMime, QJsonDocument(o).toJson(QJsonDocument::Compact));
+  if (!a.contents.empty() && a.kind != pdfz::AnnotKind::Stamp) mime->setText(QString::fromStdString(a.contents));
+  QGuiApplication::clipboard()->setMimeData(mime);
+  if (!cut) {
+    emit statusMessage(tr("Copied the %1 (Ctrl+V pastes it at the same size and place)").arg(kindLabel(a).toLower()), 3000);
+    return true;
+  }
+  view_->clearAnnotationSelection();
+  if (applyEdit(tr("Cut %1").arg(kindLabel(a)), page, Scope::Annotations,
+                [&](pdfz::Document& d) { return d.removeAnnotation(page, index); }))
+    emit statusMessage(tr("Cut (Ctrl+V pastes it)"), 3000);
+  return true;
+}
+
+bool DocumentTab::hasAnnotationsToPaste() {
+  const QMimeData* m = QGuiApplication::clipboard()->mimeData();
+  return m && m->hasFormat(kAnnotMime);
+}
+
+bool DocumentTab::pasteAnnotations(int page) {
+  if (!doc_ || page < 0 || page >= doc_->pageCount()) return false;
+  finishTextEditing();
+  const QMimeData* m = QGuiApplication::clipboard()->mimeData();
+  if (!m || !m->hasFormat(kAnnotMime)) return false;
+  const QJsonArray list = QJsonDocument::fromJson(m->data(kAnnotMime)).object()["annotations"].toArray();
+  if (list.isEmpty()) return false;
+  pdfz::Annotation a;
+  pdfz::StampDrawing drawing;
+  bool hasDrawing = false;
+  if (!fromJson(list.first().toObject(), a, drawing, hasDrawing)) return false;
+  if (a.kind == pdfz::AnnotKind::Stamp ? !hasDrawing : !copiesAsFields(a.kind)) return false;
+  if (a.kind == pdfz::AnnotKind::Stamp && a.subject.empty()) a.subject = "Stamp";
+  if (a.author.empty()) a.author = commentAuthor().toStdString();
+
+  // Where it was on its page. Past this page's edge (a smaller page): moved in just far enough,
+  // so a stamp in a corner stays in that corner; bigger than the page, in its middle.
+  const pdfz::SizeF ps = doc_->pageSize(page);
+  auto into = [](double lo, double hi, double size) {
+    if (hi - lo > size) return (size - (hi - lo)) / 2 - lo;
+    if (lo < 0) return -lo;
+    if (hi > size) return size - hi;
+    return 0.0;
+  };
+  double dx = into(a.rect.left, a.rect.right, ps.width), dy = into(a.rect.top, a.rect.bottom, ps.height);
+  // Pasted again where one already is (the one copied, say): a little down and right.
+  if (const auto existing = annots_.get(page)) {
+    auto taken = [&](double x, double y) {
+      for (const pdfz::Annotation& b : *existing)
+        if (b.kind == a.kind && std::abs(b.rect.left - (a.rect.left + x)) < 0.5 && std::abs(b.rect.top - (a.rect.top + y)) < 0.5 &&
+            std::abs(b.rect.width() - a.rect.width()) < 0.5 && std::abs(b.rect.height() - a.rect.height()) < 0.5)
+          return true;
+      return false;
+    };
+    for (int i = 0; i < 50 && taken(dx, dy); ++i) {
+      dx += 10;
+      dy += 10;
+    }
+  }
+  if (dx != 0 || dy != 0) {
+    a.rect = {a.rect.left + dx, a.rect.top + dy, a.rect.right + dx, a.rect.bottom + dy};
+    for (auto& stroke : a.ink)
+      for (pdfz::PointF& p : stroke) p = {p.x + dx, p.y + dy};
+  }
+  if (a.kind == pdfz::AnnotKind::FreeText) a.appearance = freeTextAppearance(a, doc_->pageFrame(page));
+
+  int added = -1;
+  if (!applyEdit(tr("Paste %1").arg(kindLabel(a)), page, Scope::Annotations, [&](pdfz::Document& d) {
+        added = a.kind == pdfz::AnnotKind::Stamp ? d.addStamp(page, a, drawing) : d.addAnnotation(page, a);
+        return added >= 0;
+      })) {
+    emit statusMessage(tr("That couldn't be pasted."), 3000);
+    return true;
+  }
+  view_->selectAnnotation(page, added, false);
+  return true;
+}
 
 void DocumentTab::copyContent(bool cut) {
   if (!doc_) return;
@@ -678,7 +932,7 @@ void DocumentTab::copyContent(bool cut) {
 
 bool DocumentTab::canPaste() {
   const QMimeData* m = QGuiApplication::clipboard()->mimeData();
-  return m && (m->hasFormat(kContentMime) || m->hasImage());
+  return m && (m->hasFormat(kContentMime) || m->hasFormat(kAnnotMime) || m->hasImage());
 }
 
 bool DocumentTab::pasteContent(int page) {

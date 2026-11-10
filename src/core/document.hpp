@@ -156,6 +156,10 @@ public:
   // resizing it afterwards (moveAnnotation, updateAnnotation with a new rect) keeps the
   // drawing, scaled to fit.
   int addStamp(int page, const Annotation& a, const StampDrawing& drawing);
+  // A stamp's drawing, read back from its appearance (to copy it): filled shapes and a
+  // picture, in a box `width` x `height` (display points) that its rect is drawn in. False for
+  // a stamp drawn otherwise (text, say, as other programs' stamps are).
+  bool stampDrawing(int page, int index, StampDrawing& out) const;
 
   // Form fields (forms.hpp): the widgets on a page, and filling them in. The setters refuse
   // read-only fields. A field's value is shared by all its widgets (a radio group's buttons,

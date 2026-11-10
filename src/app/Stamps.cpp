@@ -28,9 +28,10 @@ QList<StampStyle> standardStamps() {
       {QObject::tr("RECEIVED"), blue, true},      {QObject::tr("REVISED"), blue, true},
       // An office date stamp: department, date, name.
       {QObject::tr("DRAFTING"), QColor(0xD8, 0x2A, 0x3C), true, StampStyle::Layout::DateBox},
-      {QObject::tr("NOT APPROVED"), red, false},  {QObject::tr("PRELIMINARY"), blue, false},
-      {QObject::tr("CONFIDENTIAL"), red, false},  {QObject::tr("FOR COMMENT"), blue, false},
-      {QObject::tr("INFORMATION ONLY"), blue, false}, {QObject::tr("REFERENCE"), red, false},
+      {QObject::tr("NOT APPROVED"), red, false},  {QObject::tr("FOR APPROVAL"), blue, false},
+      {QObject::tr("PRELIMINARY"), blue, false},  {QObject::tr("CONFIDENTIAL"), red, false},
+      {QObject::tr("FOR COMMENT"), blue, false},  {QObject::tr("INFORMATION ONLY"), blue, false},
+      {QObject::tr("COPY"), blue, false},         {QObject::tr("REFERENCE"), red, false},
       {QObject::tr("OBSOLETE"), red, false},      {QObject::tr("VOID"), red, false},
   };
 }
@@ -216,37 +217,59 @@ QString CustomStamps::Entry::key() const { return QStringLiteral("custom:") + QF
 
 MadeStamp CustomStamps::Entry::made() const { return art.isEmpty() ? makeImageStamp(image) : makeVectorStamp(art); }
 
+namespace {
+// Names are kept in the settings, by the stamp's file name.
+QString nameKey(const QString& path) { return QStringLiteral("stamps/names/") + QFileInfo(path).completeBaseName(); }
+}  // namespace
+
 QList<CustomStamps::Entry> CustomStamps::load() {
   QList<Entry> out;
   const QDir dir(stampDir());
+  const QSettings settings;
+  int unnamed = 0;
   for (const QFileInfo& fi : dir.entryInfoList({QStringLiteral("*.png"), QStringLiteral("*.svg")}, QDir::Files,
                                                QDir::Time | QDir::Reversed)) {
     Entry e;
     e.path = fi.absoluteFilePath();
     if (fi.suffix().compare(QLatin1String("svg"), Qt::CaseInsensitive) == 0) e.art = readVectorFile(e.path, nullptr);
     else e.image = QImage(e.path);
-    if (!e.image.isNull() || !e.art.isEmpty()) out.push_back(e);
+    if (e.image.isNull() && e.art.isEmpty()) continue;
+    e.name = settings.value(nameKey(e.path)).toString().trimmed();
+    e.label = e.name.isEmpty() ? QObject::tr("Stamp %1").arg(++unnamed) : e.name;
+    out.push_back(e);
   }
   return out;
 }
 
-bool CustomStamps::add(const QImage& image) {
+QString CustomStamps::add(const QImage& image, const QString& name) {
   QImage img = image;
   if (img.width() > 1600 || img.height() > 1600) img = img.scaled(1600, 1600, Qt::KeepAspectRatio, Qt::SmoothTransformation);
-  return img.save(stampDir() + "/" + QUuid::createUuid().toString(QUuid::WithoutBraces) + ".png", "PNG");
+  const QString path = stampDir() + "/" + QUuid::createUuid().toString(QUuid::WithoutBraces) + ".png";
+  if (!img.save(path, "PNG")) return {};
+  rename(path, name);
+  return path;
 }
 
-bool CustomStamps::add(const VectorArt& art) {
-  if (art.isEmpty()) return false;
+QString CustomStamps::add(const VectorArt& art, const QString& name) {
+  if (art.isEmpty()) return {};
   const QRectF b = art.bounds();
-  QFile f(stampDir() + "/" + QUuid::createUuid().toString(QUuid::WithoutBraces) + ".svg");
-  if (!f.open(QIODevice::WriteOnly)) return false;
-  return f.write(art.toSvg(b.size())) > 0;
+  const QString path = stampDir() + "/" + QUuid::createUuid().toString(QUuid::WithoutBraces) + ".svg";
+  QFile f(path);
+  if (!f.open(QIODevice::WriteOnly) || f.write(art.toSvg(b.size())) <= 0) return {};
+  rename(path, name);
+  return path;
+}
+
+void CustomStamps::rename(const QString& path, const QString& name) {
+  QSettings s;
+  if (name.trimmed().isEmpty()) s.remove(nameKey(path));
+  else s.setValue(nameKey(path), name.trimmed());
 }
 
 void CustomStamps::remove(const QString& path) {
   if (QFileInfo(path).absolutePath() == QFileInfo(stampDir()).absoluteFilePath()) {
     StampFavorites::set(QStringLiteral("custom:") + QFileInfo(path).fileName(), false);
+    QSettings().remove(nameKey(path));
     QFile::remove(path);
   }
 }

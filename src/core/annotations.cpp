@@ -84,6 +84,7 @@ struct Page {
 };
 
 const char* const kStyleKey = "PDFZStyle";
+const char* const kBoxKey = "PDFZBox";  // a stamp's drawing box: "left bottom right top", user space
 
 struct Annot {
   FPDF_ANNOTATION a = nullptr;
@@ -809,6 +810,11 @@ int Document::addStamp(int pageIndex, const Annotation& a, const StampDrawing& d
   if (!a.subject.empty()) setString(h.a, "Subj", a.subject);
   setString(h.a, kStyleKey, formatStyle(a));
   FPDFAnnot_SetColor(h.a, FPDFANNOT_COLORTYPE_Color, a.color.r, a.color.g, a.color.b, 255);
+  {  // The box it's drawn in (its appearance's), for stampDrawing() after a move or resize.
+    char drawn[96];
+    std::snprintf(drawn, sizeof drawn, "%.3f %.3f %.3f %.3f", r.left, r.bottom, r.right, r.top);
+    setString(h.a, kBoxKey, drawn);
+  }
 
   // Drawing coordinates -> display points in the rect -> user space (so it's upright on a
   // rotated page too).
@@ -882,6 +888,121 @@ int Document::addStamp(int pageIndex, const Annotation& a, const StampDrawing& d
   }
   markEdited();
   return index;
+}
+
+bool Document::stampDrawing(int pageIndex, int index, StampDrawing& out) const {
+  out = StampDrawing{};
+  if (pageIndex < 0 || pageIndex >= pageCount()) return false;
+  std::lock_guard lock(engineMutex());
+  Page p(cachedPage(pageIndex));
+  if (!p.page) return false;
+  Annot h(FPDFPage_GetAnnot(p.page, index));
+  if (!h.a || FPDFAnnot_GetSubtype(h.a) != FPDF_ANNOT_STAMP) return false;
+  const int n = FPDFAnnot_GetObjectCount(h.a);
+  if (n <= 0) return false;
+  const PageFrame f = frameOf(p.page);
+  // The box it was drawn in: as pdfz recorded it, else what its drawing covers.
+  double l = 0, b = 0, r = 0, t = 0;
+  bool haveBox = false;
+  {
+    std::istringstream in(getString(h.a, kBoxKey));
+    haveBox = static_cast<bool>(in >> l >> b >> r >> t) && r > l && t > b;
+  }
+  if (!haveBox) {
+    for (int i = 0; i < n; ++i) {
+      float ol = 0, ob = 0, orr = 0, ot = 0;
+      if (!FPDFPageObj_GetBounds(FPDFAnnot_GetObject(h.a, i), &ol, &ob, &orr, &ot)) continue;
+      if (!haveBox) {
+        l = ol, b = ob, r = orr, t = ot;
+        haveBox = true;
+      } else {
+        l = std::min<double>(l, ol), b = std::min<double>(b, ob), r = std::max<double>(r, orr), t = std::max<double>(t, ot);
+      }
+    }
+    if (!haveBox || r <= l || t <= b) return false;
+  }
+  const RectF box = f.toDisplay(RectF{l, t, r, b}).normalized();
+  out.width = box.width();
+  out.height = box.height();
+  auto toDrawing = [&](const FS_MATRIX& m, float x, float y) {
+    const PointF d = f.toDisplay(PointF{m.a * x + m.c * y + m.e, m.b * x + m.d * y + m.f});
+    return PointF{d.x - box.left, d.y - box.top};
+  };
+  FPDF_DOCUMENT doc = static_cast<FPDF_DOCUMENT>(doc_);
+  for (int i = 0; i < n; ++i) {
+    FPDF_PAGEOBJECT obj = FPDFAnnot_GetObject(h.a, i);
+    FS_MATRIX m{};
+    if (!obj || !FPDFPageObj_GetMatrix(obj, &m)) return false;
+    const int type = FPDFPageObj_GetType(obj);
+    if (type == FPDF_PAGEOBJ_PATH) {
+      int fill = 0;
+      FPDF_BOOL stroke = false;
+      unsigned cr = 0, cg = 0, cb = 0, ca = 255;
+      if (!FPDFPath_GetDrawMode(obj, &fill, &stroke) || fill == FPDF_FILLMODE_NONE || stroke) return false;
+      FPDFPageObj_GetFillColor(obj, &cr, &cg, &cb, &ca);
+      StampDrawing::Path path;
+      path.color = Color{std::uint8_t(cr), std::uint8_t(cg), std::uint8_t(cb)};
+      path.evenOdd = fill == FPDF_FILLMODE_ALTERNATE;
+      std::vector<PointF> pending;  // Bézier points waiting for the third
+      for (int s = 0, ns = FPDFPath_CountSegments(obj); s < ns; ++s) {
+        FPDF_PATHSEGMENT seg = FPDFPath_GetPathSegment(obj, s);
+        float x = 0, y = 0;
+        if (!seg || !FPDFPathSegment_GetPoint(seg, &x, &y)) continue;
+        StampDrawing::Op op;
+        const PointF q = toDrawing(m, x, y);
+        switch (FPDFPathSegment_GetType(seg)) {
+          case FPDF_SEGMENT_MOVETO: op.kind = StampDrawing::Op::MoveTo; op.p[0] = q; path.ops.push_back(op); pending.clear(); break;
+          case FPDF_SEGMENT_LINETO: op.kind = StampDrawing::Op::LineTo; op.p[0] = q; path.ops.push_back(op); pending.clear(); break;
+          case FPDF_SEGMENT_BEZIERTO:
+            pending.push_back(q);
+            if (pending.size() == 3) {
+              op.kind = StampDrawing::Op::CubicTo;
+              op.p[0] = pending[0], op.p[1] = pending[1], op.p[2] = pending[2];
+              path.ops.push_back(op);
+              pending.clear();
+            }
+            break;
+          default: continue;
+        }
+        if (FPDFPathSegment_GetClose(seg)) {
+          StampDrawing::Op close;
+          close.kind = StampDrawing::Op::Close;
+          path.ops.push_back(close);
+        }
+      }
+      if (!path.ops.empty() && path.ops.front().kind == StampDrawing::Op::MoveTo) out.paths.push_back(std::move(path));
+    } else if (type == FPDF_PAGEOBJ_IMAGE) {
+      if (out.imageWidth > 0) return false;  // one picture, under the shapes: pdfz's own kind
+      unsigned int pw = 0, ph = 0;
+      if (!FPDFImageObj_GetImagePixelSize(obj, &pw, &ph) || pw == 0 || ph == 0 || pw > 8000 || ph > 8000) return false;
+      // Drawn at its own size, its mask (transparency) and all, then put back.
+      FPDFImageObj_SetMatrix(obj, double(pw), 0, 0, double(ph), 0, 0);
+      FPDF_BITMAP bmp = FPDFImageObj_GetRenderedBitmap(doc, p.page, obj);
+      FPDFImageObj_SetMatrix(obj, m.a, m.b, m.c, m.d, m.e, m.f);
+      if (!bmp) return false;
+      const int bw = FPDFBitmap_GetWidth(bmp), bh = FPDFBitmap_GetHeight(bmp), stride = FPDFBitmap_GetStride(bmp);
+      const int format = FPDFBitmap_GetFormat(bmp);
+      const auto* px = static_cast<const std::uint8_t*>(FPDFBitmap_GetBuffer(bmp));
+      if (bw > 0 && bh > 0 && px && (format == FPDFBitmap_BGRA || format == FPDFBitmap_BGRx || format == FPDFBitmap_BGR)) {
+        out.imageWidth = bw;
+        out.imageHeight = bh;
+        out.imageBgra.resize(std::size_t(bw) * std::size_t(bh) * 4);
+        const int bpp = format == FPDFBitmap_BGR ? 3 : 4;
+        for (int y = 0; y < bh; ++y)
+          for (int x = 0; x < bw; ++x) {
+            const std::uint8_t* s = px + std::ptrdiff_t(y) * stride + std::ptrdiff_t(x) * bpp;
+            std::uint8_t* d = &out.imageBgra[(std::size_t(y) * std::size_t(bw) + std::size_t(x)) * 4];
+            d[0] = s[0], d[1] = s[1], d[2] = s[2];
+            d[3] = format == FPDFBitmap_BGRA ? s[3] : 255;
+          }
+      }
+      FPDFBitmap_Destroy(bmp);
+      if (out.imageWidth == 0) return false;
+    } else {
+      return false;  // text, forms, shadings: not a stamp pdfz can draw again
+    }
+  }
+  return !out.paths.empty() || out.imageWidth > 0;
 }
 
 // For the other parts of pdfz built on the same PDFium helpers (forms.cpp).
