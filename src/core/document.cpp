@@ -218,6 +218,7 @@ void* Document::cachedPage(int index) const {
 }
 
 void Document::closePage(void* page) const {
+  renderHints_.erase(page);
   if (form_) FORM_OnBeforeClosePage(static_cast<FPDF_PAGE>(page), static_cast<FPDF_FORMHANDLE>(form_));
   FPDF_ClosePage(static_cast<FPDF_PAGE>(page));
 }
@@ -297,21 +298,107 @@ int Document::fileVersion() const {
   return FPDF_GetFileVersion(asDoc(doc_), &v) ? v : 0;
 }
 
-Bitmap Document::render(int index, double scale, PixelRect region, unsigned flags) const {
-  Bitmap out;
-  if (index < 0 || index >= pageCount() || scale <= 0 || region.width <= 0 || region.height <= 0)
-    return out;
-  // Keep a single bitmap under 2^31 bytes; callers tile anything bigger.
-  if (static_cast<double>(region.width) * region.height * 4 > 2'000'000'000.0) return out;
+namespace {
 
+// The page's objects (and those in its forms), for renderHints.
+void gatherHints(FPDF_PAGEOBJECT obj, double formScale, double& density, int& hairlineFills, int depth) {
+  const int type = FPDFPageObj_GetType(obj);
+  if (type == FPDF_PAGEOBJ_FORM) {
+    if (depth > 8) return;
+    FS_MATRIX m{};
+    FPDFPageObj_GetMatrix(obj, &m);
+    const double s = formScale * std::sqrt(std::abs(double(m.a) * m.d - double(m.b) * m.c));
+    for (int i = 0, n = FPDFFormObj_CountObjects(obj); i < n; ++i)
+      gatherHints(FPDFFormObj_GetObject(obj, i), s, density, hairlineFills, depth + 1);
+  } else if (type == FPDF_PAGEOBJ_IMAGE) {
+    unsigned int w = 0, h = 0;
+    FS_MATRIX m{};
+    if (!FPDFImageObj_GetImagePixelSize(obj, &w, &h) || !FPDFPageObj_GetMatrix(obj, &m)) return;
+    const double wPt = std::hypot(m.a, m.b) * formScale, hPt = std::hypot(m.c, m.d) * formScale;
+    if (wPt * hPt < 400 || wPt <= 0 || hPt <= 0) return;  // an icon: never mind
+    density = std::max({density, w / wPt, h / hPt});
+  } else if (type == FPDF_PAGEOBJ_PATH) {
+    int fill = 0;
+    FPDF_BOOL stroke = false;
+    float width = 1;
+    if (FPDFPath_GetDrawMode(obj, &fill, &stroke) && fill != FPDF_FILLMODE_NONE && stroke &&
+        FPDFPageObj_GetStrokeWidth(obj, &width) && width * formScale < 0.05)
+      ++hairlineFills;
+  }
+}
+
+// `big`, k times the size, scaled down into `out`: each pixel mostly the average of its k x k
+// block, a little toward the block's darkest, so thin lines keep some of their weight.
+void downsample(const Bitmap& big, int k, Bitmap& out) {
+  constexpr int kDarkest = 90;  // of 256
+  for (int y = 0; y < out.height; ++y) {
+    std::uint8_t* o = out.pixels.data() + std::size_t(y) * std::size_t(out.stride);
+    for (int x = 0; x < out.width; ++x) {
+      for (int c = 0; c < 4; ++c) {
+        int sum = 0, darkest = 255;
+        for (int dy = 0; dy < k; ++dy) {
+          const std::uint8_t* row = big.pixels.data() + std::size_t(y * k + dy) * std::size_t(big.stride);
+          for (int dx = 0; dx < k; ++dx) {
+            const int v = row[std::size_t(x * k + dx) * 4 + std::size_t(c)];
+            sum += v;
+            darkest = std::min(darkest, v);
+          }
+        }
+        const int avg = (sum + k * k / 2) / (k * k);
+        o[std::size_t(x) * 4 + std::size_t(c)] = std::uint8_t((avg * (256 - kDarkest) + darkest * kDarkest + 128) >> 8);
+      }
+    }
+  }
+}
+
+}  // namespace
+
+Document::RenderHints Document::renderHints(void* page) const {
+  if (auto it = renderHints_.find(page); it != renderHints_.end()) return it->second;
+  RenderHints h;
+  auto p = static_cast<FPDF_PAGE>(page);
+  for (int i = 0, n = FPDFPage_CountObjects(p); i < n; ++i)
+    gatherHints(FPDFPage_GetObject(p, i), 1.0, h.imageDensity, h.hairlineFills, 0);
+  renderHints_[page] = h;
+  return h;
+}
+
+Bitmap Document::render(int index, double scale, PixelRect region, unsigned flags) const {
+  if (index < 0 || index >= pageCount() || scale <= 0 || region.width <= 0 || region.height <= 0) return {};
+  // Keep a single bitmap under 2^31 bytes; callers tile anything bigger.
+  if (static_cast<double>(region.width) * region.height * 4 > 2'000'000'000.0) return {};
+  std::lock_guard lock(engineMutex());
+  PageHandle page(cachedPage(index));
+  if (!page) return {};
+  int k = 1;
+  if (!(flags & RenderForPrinting)) {
+    const RenderHints h = renderHints(page.page);
+    const double ratio = h.imageDensity / scale;  // picture pixels to screen pixels
+    if (ratio > 1.25) k = ratio > 2.5 ? 3 : 2;
+    if (h.hairlineFills >= 200 && scale < 3) k = std::max(k, 2);
+    const double bigPixels = double(region.width) * region.height * k * k;
+    if (bigPixels * 4 > 1'500'000'000.0) k = 1;
+  }
+  if (k == 1) return renderAt(page.page, index, scale, region, flags);
+  const Bitmap big = renderAt(page.page, index, scale * k,
+                              PixelRect{region.x * k, region.y * k, region.width * k, region.height * k}, flags);
+  if (big.width != region.width * k || big.height != region.height * k) return renderAt(page.page, index, scale, region, flags);
+  Bitmap out;
   out.width = region.width;
   out.height = region.height;
   out.stride = region.width * 4;
   out.pixels.assign(static_cast<std::size_t>(out.stride) * out.height, 0);
+  downsample(big, k, out);
+  return out;
+}
 
-  std::lock_guard lock(engineMutex());
-  PageHandle page(cachedPage(index));
-  if (!page) return {};
+Bitmap Document::renderAt(void* pageHandle, int index, double scale, PixelRect region, unsigned flags) const {
+  Bitmap out;
+  out.width = region.width;
+  out.height = region.height;
+  out.stride = region.width * 4;
+  out.pixels.assign(static_cast<std::size_t>(out.stride) * out.height, 0);
+  PageHandle page(pageHandle);
   FPDF_BITMAP bmp = FPDFBitmap_CreateEx(out.width, out.height, FPDFBitmap_BGRA, out.pixels.data(), out.stride);
   if (!bmp) return {};
   FPDFBitmap_FillRect(bmp, 0, 0, out.width, out.height, 0xFFFFFFFF);

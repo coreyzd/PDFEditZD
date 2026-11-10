@@ -514,6 +514,25 @@ TEST_CASE("the first thing on a page moved again and again, its first stream onl
   }
 }
 
+TEST_CASE("many small shapes filled and outlined with a hairline don't swell when drawn small") {
+  // As AutoCAD writes a logo: tiny filled shapes, each also outlined with a hairline (0 w).
+  // PDFium draws a hairline a whole pixel wide, so drawn small they ran together; drawn larger
+  // and scaled down, they keep their size better. 400 squares of 0.4 pt, 2 pt apart (4% ink):
+  // drawn directly at a pixel a point, 53%; twice as large and scaled down, 33%.
+  std::string squares = "0 0 0 rg 0 0 0 RG 0 w ";
+  for (int i = 0; i < 20; ++i)
+    for (int j = 0; j < 20; ++j) squares += std::to_string(10 + 2 * i) + " " + std::to_string(10 + 2 * j) + " 0.4 0.4 re B ";
+  auto doc = fromStreams({squares}, "0 0 100 100", 0);
+  const auto bmp = doc->render(0, 1.0, {0, 0, 100, 100});
+  REQUIRE(bmp.width == 100);
+  double ink = 0;
+  for (int y = 52; y < 90; ++y)  // shown: 10..48 across, 52..90 down
+    for (int x = 10; x < 48; ++x) ink += 255 - (bmp.pixel(x, y) & 0xFF);
+  ink /= 38.0 * 38.0 * 255;
+  CHECK(ink < 0.42);
+  CHECK(ink > 0.02);
+}
+
 TEST_CASE("edits don't leave the page's old fonts and pictures in the file") {
   // A picture of noise (it doesn't compress) and two lines of text, then the text moved again
   // and again: each edit reads the page through a copy of its resources, and the copies the

@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <map>
 #include <memory>
 #include <set>
 #include <shared_mutex>
@@ -114,6 +115,12 @@ public:
   // Renders part of a page at `scale` device pixels per point. `region` is in the pixels of
   // the whole page at that scale; a region of {0, 0, ceil(w*scale), ceil(h*scale)} is the
   // whole page. Returns an empty Bitmap if the page can't be loaded.
+  //
+  // Where PDFium draws a page poorly below its detail, it's drawn two or three times as large
+  // and scaled down: a scan (PDFium shrinks pictures by skipping pixels: jagged, blotchy text),
+  // or a logo made of many small shapes, each filled and outlined with a hairline (as AutoCAD
+  // writes them: PDFium's hairlines are a whole pixel, so they swell the shapes). Not when
+  // printing.
   Bitmap render(int index, double scale, PixelRect region, unsigned flags = RenderAnnotations) const;
   // The whole page, scaled to fit inside maxWidth x maxHeight pixels.
   Bitmap renderFit(int index, int maxWidth, int maxHeight, unsigned flags = RenderAnnotations) const;
@@ -244,7 +251,19 @@ private:
   void refreshPageSizes();  // caller holds the engine lock
   bool writeTo(std::vector<std::uint8_t>& out) const;  // caller holds the engine lock
 
-  void markEdited() { modified_ = true; edited_ = true; }
+  void markEdited() {
+    modified_ = true;
+    edited_ = true;
+    renderHints_.clear();
+  }
+  // What a page holds that PDFium draws poorly at low resolution (see render()).
+  struct RenderHints {
+    double imageDensity = 0;  // the sharpest picture's pixels per point
+    int hairlineFills = 0;    // shapes filled and outlined with a hairline
+  };
+  RenderHints renderHints(void* page) const;  // caller holds the engine lock
+  // render(), at the scale given, as PDFium draws it.
+  Bitmap renderAt(void* page, int index, double scale, PixelRect region, unsigned flags) const;
   // The caller holds the engine lock for all of these.
   // A parsed page, from a small cache: parsing a page's content is the slow part of anything
   // done with it (a detailed drawing can take a tenth of a second), so the pages in use stay
@@ -273,6 +292,7 @@ private:
   bool edited_ = false;  // changed since it was opened (unlike modified_, saving doesn't reset it)
   mutable std::vector<std::pair<int, void*>> pages_;  // page index, FPDF_PAGE; most recent first
   mutable std::set<int> needsAppearances_;            // pages with changed annotations
+  mutable std::map<void*, RenderHints> renderHints_;   // by FPDF_PAGE, while it's cached
   // Page sizes, read without the engine lock (the UI lays pages out while a worker renders).
   mutable std::shared_mutex sizesMutex_;
   std::vector<SizeF> sizes_;

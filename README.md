@@ -167,6 +167,13 @@ changing their matrices (and their clipping with them). On a page turned by /Rot
 programs often plot drawings) the content is read in the page's own space, not turned upright,
 so nothing else on the page turns when one thing is moved.
 
+Pages PDFium draws poorly below their detail are drawn two or three times as large and scaled
+down: scans (PDFium shrinks a picture by dropping pixels, which makes scanned text blotchy) and
+logos made of many small shapes, each filled and outlined with a hairline, as AutoCAD writes
+them (PDFium draws a hairline a whole pixel wide, so at screen size they swelled into each
+other). Scaling down averages each block of pixels, leaning a little toward its darkest so thin
+lines keep their weight. Other pages, and printing, are drawn as before.
+
 PDFium saves every object it has held, used or not, and an edit reads the page through a copy
 of its fonts and pictures, so files grew with every edit. Saving now leaves out the objects
 nothing refers to (the file PDFium wrote is plain enough to go through quickly), so a file
