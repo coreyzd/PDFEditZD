@@ -331,7 +331,7 @@ private:
   QElapsedTimer sinceDoubleClick_;  // for triple clicks (select the line)
   QPoint doubleClickPos_;
   double zoom_ = 1.0;
-  FitMode fitMode_ = FitMode::Width;
+  FitMode fitMode_ = FitMode::Page;  // a document opens showing whole pages
   std::vector<QRectF> pageRects_;  // content coordinates (logical pixels)
   QSizeF contentSize_;
   int currentPage_ = 0;

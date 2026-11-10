@@ -401,6 +401,21 @@ QIcon sizeIcon(bool larger, const QPalette& palette) {
   });
 }
 
+QIcon fitWidthIcon(const QPalette& palette) {
+  // Thin lines, like the icon theme's Fit Page beside it.
+  return drawnIcon(palette, 20, [&](QPainter& p, const QColor& ink, bool) {
+    p.setPen(QPen(ink, 1.2, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    p.drawLine(QPointF(2.5, 4), QPointF(2.5, 16));    // the page's edges
+    p.drawLine(QPointF(17.5, 4), QPointF(17.5, 16));
+    p.drawLine(QPointF(5.5, 10), QPointF(14.5, 10));  // the arrow, out to both
+    QPolygonF left, right;
+    left << QPointF(8.5, 7) << QPointF(5.5, 10) << QPointF(8.5, 13);
+    right << QPointF(11.5, 7) << QPointF(14.5, 10) << QPointF(11.5, 13);
+    p.drawPolyline(left);
+    p.drawPolyline(right);
+  });
+}
+
 QCursor crosshairCursor(qreal dpr) {
   static std::map<int, QCursor> cache;
   const int key = int(std::lround(dpr * 100));

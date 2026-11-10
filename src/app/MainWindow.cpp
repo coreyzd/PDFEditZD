@@ -683,7 +683,10 @@ void MainWindow::createActions() {
   fitPageAct_->setCheckable(true);
   connect(fitPageAct_, &QAction::triggered, this,
           [this] { if (auto* t = tab()) t->view()->setFitMode(DocumentView::FitMode::Page); });
-  fitWidthAct_ = new QAction(themeIcon("zoom-fit-width"), tr("Fit &Width"), this);
+  // Windows' icon theme has no Fit Width (it showed as text): one drawn here then.
+  QIcon fitWidth = themeIcon("zoom-fit-width");
+  if (fitWidth.isNull() || fitWidth.availableSizes().isEmpty()) fitWidth = fitWidthIcon(palette());
+  fitWidthAct_ = new QAction(fitWidth, tr("Fit &Width"), this);
   fitWidthAct_->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_2));
   fitWidthAct_->setCheckable(true);
   connect(fitWidthAct_, &QAction::triggered, this,
