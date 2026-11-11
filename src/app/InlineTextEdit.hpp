@@ -27,6 +27,9 @@ public:
   // Text typed on a form (Fill & Sign): no wrapping, so the box can grow to fit the longest
   // line; textWidth() is that line's width in pixels (padding not included).
   void setAutoWidth(bool on);
+  // Lines wrapped at this width (pixels, padding not included) rather than the editor's own;
+  // 0 for its own.
+  void setWrapWidth(double px);
   // Lines exactly this far apart (pixels), as the page's text was (Edit PDF); or at least
   // that far, where some text is larger.
   void setLineHeight(double px, bool atLeast = false);

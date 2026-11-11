@@ -50,6 +50,7 @@ struct FontFace {
   QString postscript;    // name 6: "RobotoMono-Regular", "RomanD"
   int weight = 400;
   bool italic = false;
+  int widthClass = 5;    // OS/2: 5 normal, 3 condensed (Arial Narrow), 7 expanded
 };
 
 quint16 be16(const char* p) { return quint16((quint8(p[0]) << 8) | quint8(p[1])); }
@@ -115,6 +116,7 @@ std::optional<FontFace> readFace(const QString& path) {
   const QByteArray os2 = table("OS/2", 64);
   if (os2.size() >= 64) {
     face.weight = be16(os2.constData() + 4);
+    face.widthClass = be16(os2.constData() + 6);
     const int sel = be16(os2.constData() + 62);
     face.italic = (sel & 1) != 0;
     if ((sel & 0x20) && face.weight < 600) face.weight = 700;
@@ -181,8 +183,10 @@ QString fontFile(const QString& family, bool bold, bool italic) {
   for (const FontFace& face : installedFaces()) {
     if (std::none_of(face.families.begin(), face.families.end(), [&](const QString& f) { return squeezed(f) == want; }))
       continue;
+    // Arial Narrow's typographic family is "Arial" (its style "Narrow"): Arial asked for is
+    // the normal width, unless only a narrow or wide one is there.
     const int score = ((face.weight >= 600) != bold ? 1000 : 0) + (face.italic != italic ? 2000 : 0) +
-                      std::abs(face.weight - (bold ? 700 : 400));
+                      std::abs(face.weight - (bold ? 700 : 400)) + (face.widthClass != 5 ? 500 : 0);
     if (score < bestScore) {
       bestScore = score;
       found = face.file;

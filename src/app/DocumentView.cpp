@@ -528,6 +528,23 @@ bool isDragTool(MarkupTool t) {
 void DocumentView::mousePressEvent(QMouseEvent* e) {
   const QPointF pos = e->position();
   const bool left = e->button() == Qt::LeftButton;
+  // A side of the box being typed in (Edit PDF): it's made wider or narrower, the text wrapping
+  // again in it, and the typing goes on.
+  if (left && contentEditor_) {
+    const int side = editorHandleUnder(pos);
+    if (side >= 0) {
+      drag_ = Drag::WidenEditor;
+      dragPage_ = editing_.page;
+      resizeCorner_ = side;
+      dragStart_ = dragNow_ = pointOnPage(dragPage_, pos);
+      dragMoved_ = false;
+      const double ppp = pagePixelsPerPoint(dragPage_);
+      widenFromX_ = editing_.origin.x;
+      widenFromWidth_ = editing_.width > 0 ? editing_.width : contentEditor_->textWidth() / ppp / editorTextScale();
+      e->accept();
+      return;
+    }
+  }
   commitTextEdit();  // a click outside the box being typed in ends the typing
   commitFieldEdit();
   commitContentEdit();
@@ -732,6 +749,18 @@ void DocumentView::mouseMoveEvent(QMouseEvent* e) {
         inkPoints_.push_back({pt.x(), pt.y()});
     }
     dragNow_ = pt;
+    if (drag_ == Drag::WidenEditor && contentEditor_) {
+      const double dx = pt.x() - dragStart_.x(), least = std::max(editing_.style.size, 6.0);
+      if (resizeCorner_ == 1) {
+        editing_.width = std::max(least, widenFromWidth_ + dx);
+      } else {
+        const double w = std::max(least, widenFromWidth_ - dx);
+        editing_.origin.x = widenFromX_ + widenFromWidth_ - w;
+        editing_.width = w;
+      }
+      contentEditor_->setAutoWidth(false);
+      fitContentEditor();
+    }
     viewport()->update();
     e->accept();
     return;
@@ -771,7 +800,12 @@ void DocumentView::mouseReleaseEvent(QMouseEvent* e) {
   if (drag_ != Drag::None && e->button() == Qt::LeftButton) {
     const Drag d = drag_;
     drag_ = Drag::None;
-    if (d == Drag::MoveAnnot && dragMoved_) {
+    if (d == Drag::WidenEditor) {
+      if (contentEditor_) {
+        fitContentEditor();
+        contentEditor_->setFocus(Qt::OtherFocusReason);
+      }
+    } else if (d == Drag::MoveAnnot && dragMoved_) {
       emit annotationMoved(dragPage_, selIndex_, dragNow_.x() - dragStart_.x(), dragNow_.y() - dragStart_.y());
     } else if (d == Drag::ResizeAnnot && dragMoved_) {
       const pdfz::RectF r = resizedBounds();
@@ -904,6 +938,10 @@ void DocumentView::autoScrollStep() {
 }
 
 void DocumentView::updateHoverCursor(QPointF pos) {
+  if (contentEditor_ && editorHandleUnder(pos) >= 0) {
+    viewport()->setCursor(Qt::SizeHorCursor);
+    return;
+  }
   if (tool_ == Tool::Edit) {
     const int handle = contentHandleUnder(pos);
     int page, listPos;
@@ -1741,7 +1779,8 @@ void DocumentView::startContentEdit(const TextEditing& e) {
   contentEditor_ = new InlineTextEdit(viewport());
   contentEditor_->setAutoWidth(e.width <= 0);
   connect(contentEditor_, &InlineTextEdit::finished, this, [this, gen] {
-    if (gen == contentGeneration_) commitContentEdit();
+    // Not while a side of its box is dragged (the click took the keyboard): it gets it back.
+    if (gen == contentGeneration_ && drag_ != Drag::WidenEditor) commitContentEdit();
   }, Qt::QueuedConnection);
   connect(contentEditor_, &InlineTextEdit::heightNeeded, this, [this, gen] {
     if (gen == contentGeneration_) fitContentEditor();
@@ -1849,13 +1888,16 @@ void DocumentView::layoutContentEditor(bool restyle) {
   const double ascent = QFontMetricsF(qtFont(first.font, 1000)).ascent() / 1000 * first.size;
   const double lines = std::max(1, int(contentEditor_->document()->blockCount()));
   const double top = editing_.origin.y - ascent - pad / ppp;
-  const double width = editing_.width > 0 ? editing_.width + 2 * pad / ppp
+  const double scale = editing_.width > 0 ? editorTextScale() : 1;
+  const double width = editing_.width > 0 ? editing_.width * std::max(1.0, scale) + 2 * pad / ppp
                                           : std::max(editing_.style.size * 2, contentEditor_->textWidth() / ppp + editing_.style.size * 0.8 + 2 * pad / ppp);
   const double height = std::max(editing_.lineSpacing * lines, contentEditor_->contentHeight() / ppp);
   const QRectF r = toViewport(page, pdfz::RectF{editing_.origin.x - pad / ppp, top, editing_.origin.x - pad / ppp + width,
                                                 top + height + 2 * pad / ppp});
   contentEditor_->setGeometry(QRect(QPoint(int(std::floor(r.left())), int(std::floor(r.top()))),
                                     QPoint(int(std::ceil(r.right())), int(std::ceil(r.bottom())))));
+  // Its lines break where the page's will.
+  contentEditor_->setWrapWidth(editing_.width > 0 ? editing_.width * ppp * scale : 0);
   if (!restyle) return;
   QFont font = qtFont(editing_.style.font, 10);
   font.setPointSizeF(std::max(0.5, editing_.style.size * ppp * 72.0 / logicalDpiY()));
@@ -1882,6 +1924,29 @@ void DocumentView::layoutContentEditor(bool restyle) {
 void DocumentView::fitContentEditor() {
   layoutContentEditor(false);
   viewport()->update();  // its frame
+}
+
+double DocumentView::editorTextScale() const {
+  if (editing_.page < 0) return 1;
+  const double ppp = pagePixelsPerPoint(editing_.page);
+  const QString sample = QStringLiteral("The quick brown fox jumps over the lazy dog, 0123456789 TIMES.");
+  const QFont screen = charFormat(editing_.style, ppp, logicalDpiY()).font();
+  const double exact = QFontMetricsF(qtFont(editing_.style.font, 1000)).horizontalAdvance(sample) / 1000 * editing_.style.size * ppp;
+  if (exact <= 0) return 1;
+  return std::clamp(QFontMetricsF(screen).horizontalAdvance(sample) / exact, 0.8, 1.25);
+}
+
+std::array<QPointF, 2> DocumentView::editorHandles() const {
+  const QRectF r = QRectF(contentEditor_->geometry()).adjusted(-2, -2, 2, 2);
+  return {QPointF(r.left(), r.center().y()), QPointF(r.right(), r.center().y())};
+}
+
+int DocumentView::editorHandleUnder(QPointF viewportPos) const {
+  if (!contentEditor_ || !contentEditor_->isVisible()) return -1;
+  const auto h = editorHandles();
+  for (int i = 0; i < 2; ++i)
+    if (std::abs(viewportPos.x() - h[std::size_t(i)].x()) <= 6 && std::abs(viewportPos.y() - h[std::size_t(i)].y()) <= 6) return i;
+  return -1;
 }
 
 bool DocumentView::visibleCenter(int& page, pdfz::PointF& point) const {
@@ -1955,6 +2020,11 @@ void DocumentView::paintContent(QPainter& p) {
     p.setPen(QPen(accent, 1, Qt::DashLine));
     p.setBrush(Qt::NoBrush);
     p.drawRect(QRectF(contentEditor_->geometry()).adjusted(-2, -2, 2, 2));
+    // Its sides' handles: dragged, the box gets wider or narrower.
+    p.setPen(QPen(accent, 1));
+    p.setBrush(Qt::white);
+    for (const QPointF& h : editorHandles()) p.drawRect(QRectF(h.x() - 3.5, h.y() - 3.5, 7, 7));
+    p.setBrush(Qt::NoBrush);
   }
 }
 

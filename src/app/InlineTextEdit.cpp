@@ -12,6 +12,7 @@
 #include <QTextOption>
 
 #include <algorithm>
+#include <cmath>
 
 InlineTextEdit::InlineTextEdit(QWidget* parent) : QTextEdit(parent) {
   setAcceptRichText(false);  // pasting brings the text, not its formatting
@@ -57,6 +58,18 @@ void InlineTextEdit::setAutoWidth(bool on) {
   QTextOption opt = document()->defaultTextOption();
   opt.setWrapMode(on ? QTextOption::NoWrap : QTextOption::WrapAtWordBoundaryOrAnywhere);
   document()->setDefaultTextOption(opt);
+}
+
+void InlineTextEdit::setWrapWidth(double px) {
+  if (lineWrapMode() == QTextEdit::NoWrap) return;
+  if (px <= 0) {
+    setLineWrapMode(QTextEdit::WidgetWidth);
+    return;
+  }
+  const int width = int(std::floor(px + 2 * document()->documentMargin()));
+  if (lineWrapMode() == QTextEdit::FixedPixelWidth && lineWrapColumnOrWidth() == width) return;
+  setLineWrapMode(QTextEdit::FixedPixelWidth);
+  setLineWrapColumnOrWidth(width);
 }
 
 void InlineTextEdit::setLineHeight(double px, bool atLeast) {

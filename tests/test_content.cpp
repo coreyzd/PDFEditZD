@@ -5,6 +5,15 @@
 #include "core/document.hpp"
 
 #include <algorithm>
+#include <fstream>
+#include <iterator>
+#include <mutex>
+#include <set>
+
+#include <fpdf_edit.h>
+#include <fpdfview.h>
+
+#include "core/engine.hpp"
 
 using pdfz::ContentBlock;
 using pdfz::Document;
@@ -531,6 +540,66 @@ TEST_CASE("many small shapes filled and outlined with a hairline don't swell whe
   ink /= 38.0 * 38.0 * 255;
   CHECK(ink < 0.42);
   CHECK(ink > 0.02);
+}
+
+TEST_CASE("two embedded fonts of the same name stay apart when the page is written again") {
+  // Each edit embeds the characters it needs (a subset), all named for the font ("ArialMT").
+  // PDFium gave fonts of the same name the same resource on the page, so after the next edit
+  // (or saving) text came out in another subset's glyphs, garbled. Here: the same font file
+  // twice, the second a little different, as two edits' subsets are.
+  std::vector<std::uint8_t> file;
+  for (const char* path : {"/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                           "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+                           "C:/Windows/Fonts/arial.ttf", "/System/Library/Fonts/Supplemental/Arial.ttf"}) {
+    std::ifstream in(path, std::ios::binary);
+    if (in) {
+      file.assign(std::istreambuf_iterator<char>(in), {});
+      break;
+    }
+  }
+  if (file.size() < 1000) {
+    MESSAGE("no font file found: skipped");
+    return;
+  }
+  auto doc = page();
+  auto withFont = [](pdfz::TextLines t, const std::vector<std::uint8_t>& f, const char* key) {
+    t.font.standard.clear();
+    t.font.file = f;
+    t.font.key = key;
+    return t;
+  };
+  std::vector<std::uint8_t> other = file;
+  other.insert(other.end(), {0, 0, 0, 0});
+  REQUIRE(doc->replaceText(0, {}, withFont(lines({"First words"}, 20, 40), file, "one")));
+  REQUIRE(doc->replaceText(0, {}, withFont(lines({"Second words"}, 20, 80), other, "two")));
+  // Something else edited (the page written again), then saved and opened again.
+  REQUIRE(doc->replaceText(0, {}, lines({"Third"}, 20, 120)));
+  auto again = reopen(*doc);
+  std::string all;
+  for (const ContentBlock& b : again->contentBlocks(0)) all += b.text + "\n";
+  CHECK(all.find("First words") != std::string::npos);
+  CHECK(all.find("Second words") != std::string::npos);
+  // Two fonts, by two names (each tagged as a subset: "ABCDEF+DejaVuSans").
+  std::set<std::string> names;
+  {
+    std::lock_guard lock(pdfz::engineMutex());
+    FPDF_PAGE p = FPDF_LoadPage(static_cast<FPDF_DOCUMENT>(again->handle()), 0);
+    REQUIRE(p);
+    for (int i = 0; i < FPDFPage_CountObjects(p); ++i) {
+      FPDF_PAGEOBJECT obj = FPDFPage_GetObject(p, i);
+      if (FPDFPageObj_GetType(obj) != FPDF_PAGEOBJ_TEXT) continue;
+      char name[128] = {};
+      FPDFFont_GetBaseFontName(FPDFTextObj_GetFont(obj), name, sizeof name);
+      names.insert(name);
+    }
+    FPDF_ClosePage(p);
+  }
+  CHECK(names.size() == 3);  // and Helvetica
+  for (const std::string& n : names)
+    if (n != "Helvetica") CHECK((n.size() > 7 && n[6] == '+'));
+  // Read back as the font's own name, without the tag.
+  for (const ContentBlock& b : again->contentBlocks(0))
+    if (b.text.find("words") != std::string::npos) CHECK(b.fontName.find('+') == std::string::npos);
 }
 
 TEST_CASE("a shape outlined with a hairline has no spikes at its sharp corners") {

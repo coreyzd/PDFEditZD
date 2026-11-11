@@ -182,17 +182,20 @@ FontFileNames namesInFontFile(const std::vector<std::uint8_t>& d) {
     auto it = best.find(id);
     if (it == best.end() || it->second.first < rank) best[id] = {rank, text};
   }
-  if (best.count(16)) out.family = best[16].second;
+  int weight = 0, selection = 0, width = 5;
+  if (os2Off && os2Len >= 64 && os2Off + 64 <= d.size()) {
+    weight = int(u16(os2Off + 4));
+    width = int(u16(os2Off + 6));
+    selection = int(u16(os2Off + 62));
+  }
+  // The typographic family ("Roboto" for Roboto Medium), but not where it loses the width:
+  // Arial Narrow's is "Arial".
+  if (best.count(16) && !(width != 5 && best.count(1))) out.family = best[16].second;
   else if (best.count(1)) out.family = best[1].second;
   if (out.family.empty()) return out;
   out.known = true;
   if (best.count(6)) out.postscript = best[6].second;
   const std::string sub = best.count(17) ? best[17].second : best.count(2) ? best[2].second : "";
-  int weight = 0, selection = 0;
-  if (os2Off && os2Len >= 64 && os2Off + 64 <= d.size()) {
-    weight = int(u16(os2Off + 4));
-    selection = int(u16(os2Off + 62));
-  }
   out.bold = weight >= 600 || (selection & 0x20) || contains(sub, "bold") || contains(sub, "black") || contains(sub, "heavy");
   out.italic = (selection & 1) || contains(sub, "italic") || contains(sub, "oblique");
   return out;
@@ -271,7 +274,7 @@ Piece pieceOf(FPDF_PAGEOBJECT obj, int index, FPDF_TEXTPAGE textPage, std::map<F
       it = embedded.emplace(font, names).first;
     }
     if (it->second.known) {
-      if (!it->second.postscript.empty()) p.font = it->second.postscript;
+      if (!it->second.postscript.empty()) p.font = cleanFontName(it->second.postscript);
       p.family = it->second.family;
       p.bold = it->second.bold;
       p.italic = it->second.italic;
@@ -692,6 +695,111 @@ namespace {
 
 bool generateContent(FPDF_PAGE page) { return FPDFPage_GenerateContent(page); }
 
+std::uint32_t be32(const std::uint8_t* p) { return std::uint32_t(p[0]) << 24 | std::uint32_t(p[1]) << 16 | std::uint32_t(p[2]) << 8 | p[3]; }
+std::uint16_t be16(const std::uint8_t* p) { return std::uint16_t(p[0] << 8 | p[1]); }
+void put32(std::uint8_t* p, std::uint32_t v) {
+  p[0] = std::uint8_t(v >> 24), p[1] = std::uint8_t(v >> 16), p[2] = std::uint8_t(v >> 8), p[3] = std::uint8_t(v);
+}
+void put16(std::vector<std::uint8_t>& out, unsigned v) {
+  out.push_back(std::uint8_t(v >> 8));
+  out.push_back(std::uint8_t(v));
+}
+
+// The font file with a subset tag on its PostScript name: "ArialMT" becomes "KXQBWF+ArialMT",
+// the tag made from the file's bytes. PDFium names a font it embeds (its /BaseFont) by the
+// PostScript name, and when it writes a page it gives fonts with the same /BaseFont the same
+// resource name: text in a second embedded Arial (another edit's characters) or in the page's
+// own ArialMT came out in the other font's glyphs, garbled. The tag tells them apart, as PDF
+// subset tags are meant to (and cleanFontName takes it off again). The file as it is if it
+// can't be read.
+std::vector<std::uint8_t> withSubsetTag(const std::vector<std::uint8_t>& file) {
+  const std::size_t n = file.size();
+  if (n < 12) return file;
+  const std::uint8_t* d = file.data();
+  const unsigned tables = be16(d + 4);
+  if (12 + std::size_t(tables) * 16 > n) return file;
+  std::size_t rec = 0, at = 0, len = 0;
+  for (unsigned i = 0; i < tables; ++i) {
+    const std::uint8_t* r = d + 12 + i * 16;
+    if (std::memcmp(r, "name", 4) == 0) {
+      rec = 12 + std::size_t(i) * 16;
+      at = be32(r + 8);
+      len = be32(r + 12);
+    }
+  }
+  if (!rec || at + 6 > n || len < 6 || at + len > n) return file;
+  const std::uint8_t* t = d + at;
+  const unsigned format = be16(t), count = be16(t + 2), storage = be16(t + 4);
+  std::size_t end = 6 + std::size_t(count) * 12;
+  unsigned langTags = 0;
+  if (format == 1) {
+    if (end + 2 > len) return file;
+    langTags = be16(t + end);
+    end += 2 + std::size_t(langTags) * 4;
+  }
+  if (format > 1 || end > len || storage > len) return file;
+  // The tag: six capitals from a hash of the file.
+  std::uint64_t h = 1469598103934665603ull;
+  for (std::uint8_t c : file) h = (h ^ c) * 1099511628211ull;
+  char tag[8];
+  for (int i = 0; i < 6; ++i, h /= 26) tag[i] = char('A' + h % 26);
+  tag[6] = '+';
+  tag[7] = 0;
+  // The table again: the same records, their strings in a new store, the PostScript names
+  // (nameID 6) tagged (Windows names in UTF-16, Mac ones in single bytes).
+  std::vector<std::uint8_t> head, strings;
+  put16(head, format);
+  put16(head, count);
+  put16(head, unsigned(end));
+  bool tagged = false;
+  auto string = [&](std::size_t off, std::size_t slen, const std::string& prefix, bool wide) -> std::pair<unsigned, unsigned> {
+    const std::size_t start = strings.size();
+    for (char c : prefix) {
+      if (wide) strings.push_back(0);
+      strings.push_back(std::uint8_t(c));
+    }
+    if (at + storage + off + slen <= n) strings.insert(strings.end(), d + at + storage + off, d + at + storage + off + slen);
+    return {unsigned(start), unsigned(strings.size() - start)};
+  };
+  for (unsigned i = 0; i < count; ++i) {
+    const std::uint8_t* r = t + 6 + i * 12;
+    const unsigned platform = be16(r), nameId = be16(r + 6);
+    const bool ps = nameId == 6 && (platform == 1 || platform == 3);
+    const auto [off, slen] = string(be16(r + 10), be16(r + 8), ps ? std::string(tag) : std::string(), platform != 1);
+    tagged = tagged || ps;
+    head.insert(head.end(), r, r + 8);
+    put16(head, slen);
+    put16(head, off);
+  }
+  if (format == 1) {
+    put16(head, langTags);
+    for (unsigned i = 0; i < langTags; ++i) {
+      const std::uint8_t* r = t + 6 + count * 12 + 2 + i * 4;
+      const auto [off, slen] = string(be16(r + 2), be16(r), {}, false);
+      put16(head, slen);
+      put16(head, off);
+    }
+  }
+  if (!tagged || strings.size() > 0xFFFF) return file;
+  head.insert(head.end(), strings.begin(), strings.end());
+  // At the end of the file (the old table stays, unused), its record pointed there.
+  std::vector<std::uint8_t> out(file);
+  while (out.size() % 4) out.push_back(0);
+  const std::size_t newAt = out.size();
+  out.insert(out.end(), head.begin(), head.end());
+  std::uint32_t sum = 0;
+  for (std::size_t i = 0; i < head.size(); i += 4) {
+    std::uint8_t w[4] = {0, 0, 0, 0};
+    for (std::size_t j = 0; j < 4 && i + j < head.size(); ++j) w[j] = head[i + j];
+    sum += be32(w);
+  }
+  while (out.size() % 4) out.push_back(0);
+  put32(out.data() + rec + 4, sum);
+  put32(out.data() + rec + 8, std::uint32_t(newAt));
+  put32(out.data() + rec + 12, std::uint32_t(head.size()));
+  return out;
+}
+
 // `m`, a map of the display frame, as a map of the page's user space.
 FS_MATRIX userMatrix(const PageFrame& f, const Affine& m) {
   auto t = [&](PointF user) { return f.toUser(m.map(f.toDisplay(user))); };
@@ -780,7 +888,8 @@ bool Document::replaceText(int pageIndex, const std::vector<int>& remove, const 
       for (auto& [key, f] : fonts_)
         if (key == tf.key) fonts[k] = static_cast<FPDF_FONT>(f);
       if (!fonts[k]) {
-        fonts[k] = FPDFText_LoadFont(doc, tf.file.data(), static_cast<uint32_t>(tf.file.size()), FPDF_FONT_TRUETYPE,
+        const std::vector<std::uint8_t> file = withSubsetTag(tf.file);
+        fonts[k] = FPDFText_LoadFont(doc, file.data(), static_cast<uint32_t>(file.size()), FPDF_FONT_TRUETYPE,
                                      /*cid=*/true);
         if (fonts[k]) fonts_.emplace_back(tf.key, fonts[k]);
       }

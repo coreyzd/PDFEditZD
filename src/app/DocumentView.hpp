@@ -13,6 +13,8 @@
 #include "core/annotations.hpp"
 
 #include <QAbstractScrollArea>
+
+#include <array>
 #include <QElapsedTimer>
 #include <QImage>
 #include <QPoint>
@@ -303,6 +305,13 @@ private:
   void startNewText(int page, QPointF point);
   void layoutContentEditor(bool restyle);
   void fitContentEditor();
+  // Text in the editor, as wide on screen as it is on the page: the screen's fonts come in
+  // whole pixel sizes (9 pt at 118% is drawn 14 pixels, not 14.16, 1.3% narrower), so the
+  // editor's lines would hold more than the page's.
+  double editorTextScale() const;
+  // The text being typed in: its box's side handles (viewport), 0 left, 1 right; -1 for none.
+  std::array<QPointF, 2> editorHandles() const;
+  int editorHandleUnder(QPointF viewportPos) const;
   void paintContent(QPainter& p);
 
   PageRenderer* renderer_;
@@ -315,7 +324,7 @@ private:
   int selPage_ = -1;   // the selected annotation
   int selIndex_ = -1;
   // A drag in progress on page dragPage_, in its display points.
-  enum class Drag { None, MoveAnnot, ResizeAnnot, Create, MoveContent, ResizeContent, RotateContent, MarqueeContent };
+  enum class Drag { None, MoveAnnot, ResizeAnnot, Create, MoveContent, ResizeContent, RotateContent, MarqueeContent, WidenEditor };
   Drag drag_ = Drag::None;
   int dragPage_ = -1;
   QPointF dragStart_;
@@ -377,5 +386,6 @@ private:
   InlineTextEdit* contentEditor_ = nullptr;
   TextEditing editing_;
   quint64 contentGeneration_ = 0;
+  double widenFromX_ = 0, widenFromWidth_ = 0;  // the box's left and width when a side was grabbed
   RichRun editNewStyle_{QString(), EditFont{QStringLiteral("Helvetica")}, 12, Qt::black, 0};  // new text
 };
