@@ -844,6 +844,8 @@ bool Document::replaceText(int pageIndex, const std::vector<int>& remove, const 
 void* Document::pageForContentEdit(int pageIndex) {
   auto page = static_cast<FPDF_PAGE>(cachedPage(pageIndex));
   if (!page) return nullptr;
+  // The objects are about to change (some destroyed): what render() kept of them goes.
+  renderHints_.erase(page);
   const int n = FPDFPage_CountObjects(page);
   if (n < 2) return page;
   FPDF_DOCUMENT doc = static_cast<FPDF_DOCUMENT>(doc_);

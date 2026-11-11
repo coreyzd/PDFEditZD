@@ -174,6 +174,12 @@ them (PDFium draws a hairline a whole pixel wide, so at screen size they swelled
 other). Scaling down averages each block of pixels, leaning a little toward its darkest so thin
 lines keep their weight. Other pages, and printing, are drawn as before.
 
+Lines thinner than a pixel (AutoCAD outlines each triangle of a filled shape with a zero-width
+line) are drawn with round corners rather than mitered ones, at any zoom and when printing:
+PDFium draws such a line a whole pixel wide, and a miter at a sliver's sharp corner stuck out
+several pixels past it, so filled shapes (an angle sign, a logo's edges) looked hairy. Only
+the page as drawn changes; the file keeps its corners as they were.
+
 PDFium saves every object it has held, used or not, and an edit reads the page through a copy
 of its fonts and pictures, so files grew with every edit. Saving now leaves out the objects
 nothing refers to (the file PDFium wrote is plain enough to go through quickly), so a file

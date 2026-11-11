@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cmath>
+#include <cstdlib>
 #include <fstream>
 #include <set>
 #include <system_error>
@@ -301,7 +302,14 @@ int Document::fileVersion() const {
 namespace {
 
 // The page's objects (and those in its forms), for renderHints.
-void gatherHints(FPDF_PAGEOBJECT obj, double formScale, double& density, int& hairlineFills, int depth) {
+struct HintsOut {
+  double density = 0;
+  int hairlineFills = 0;
+  std::vector<detail::ThinMiter> thinMiters;
+};
+
+// `box`: the bounds of the page object `obj` is (or is in).
+void gatherHints(FPDF_PAGEOBJECT obj, double formScale, const detail::ThinMiter& box, HintsOut& out, int depth) {
   const int type = FPDFPageObj_GetType(obj);
   if (type == FPDF_PAGEOBJ_FORM) {
     if (depth > 8) return;
@@ -309,23 +317,60 @@ void gatherHints(FPDF_PAGEOBJECT obj, double formScale, double& density, int& ha
     FPDFPageObj_GetMatrix(obj, &m);
     const double s = formScale * std::sqrt(std::abs(double(m.a) * m.d - double(m.b) * m.c));
     for (int i = 0, n = FPDFFormObj_CountObjects(obj); i < n; ++i)
-      gatherHints(FPDFFormObj_GetObject(obj, i), s, density, hairlineFills, depth + 1);
+      gatherHints(FPDFFormObj_GetObject(obj, i), s, box, out, depth + 1);
   } else if (type == FPDF_PAGEOBJ_IMAGE) {
     unsigned int w = 0, h = 0;
     FS_MATRIX m{};
     if (!FPDFImageObj_GetImagePixelSize(obj, &w, &h) || !FPDFPageObj_GetMatrix(obj, &m)) return;
     const double wPt = std::hypot(m.a, m.b) * formScale, hPt = std::hypot(m.c, m.d) * formScale;
     if (wPt * hPt < 400 || wPt <= 0 || hPt <= 0) return;  // an icon: never mind
-    density = std::max({density, w / wPt, h / hPt});
+    out.density = std::max({out.density, w / wPt, h / hPt});
   } else if (type == FPDF_PAGEOBJ_PATH) {
     int fill = 0;
     FPDF_BOOL stroke = false;
     float width = 1;
-    if (FPDFPath_GetDrawMode(obj, &fill, &stroke) && fill != FPDF_FILLMODE_NONE && stroke &&
-        FPDFPageObj_GetStrokeWidth(obj, &width) && width * formScale < 0.05)
-      ++hairlineFills;
+    if (!FPDFPath_GetDrawMode(obj, &fill, &stroke) || !stroke || !FPDFPageObj_GetStrokeWidth(obj, &width)) return;
+    if (fill != FPDF_FILLMODE_NONE && width * formScale < 0.05) ++out.hairlineFills;
+    if (FPDFPageObj_GetLineJoin(obj) != FPDF_LINEJOIN_MITER) return;
+    // The width in points: the path's own units, through its matrix and its forms'.
+    FS_MATRIX m{1, 0, 0, 1, 0, 0};
+    FPDFPageObj_GetMatrix(obj, &m);
+    const double widthPt = width * formScale * std::sqrt(std::abs(double(m.a) * m.d - double(m.b) * m.c));
+    if (widthPt >= 0.5) return;
+    detail::ThinMiter t = box;
+    t.path = obj;
+    t.width = widthPt;
+    out.thinMiters.push_back(t);
   }
 }
+
+// While a page is drawn: round corners for the outlines PDFium draws a pixel wide (any thinner
+// than that), put back as they were after. A mitered corner of a pixel-wide line sticks out up
+// to ten times its width (the miter limit) past an acute point: AutoCAD draws filled shapes as
+// triangles, each also outlined with a zero-width line, and every sliver's sharp corner left a
+// spike, so filled shapes looked hairy (an angle sign's foot, a logo's edges). Acrobat draws
+// them clean. Only the page objects in memory change, never the file: everything that rewrites
+// a page's content takes its objects from the file again first (pageForContentEdit).
+class RoundThinCorners {
+public:
+  // `scale`: device pixels per point; `user`: what's drawn, in user space (top > bottom).
+  RoundThinCorners(const std::vector<detail::ThinMiter>& thin, double scale, const RectF& user) {
+    for (const detail::ThinMiter& t : thin) {
+      if (t.width * scale >= 1) continue;  // drawn as wide as it is: its corners are as drawn
+      if (t.right < user.left || t.left > user.right || t.top < user.bottom || t.bottom > user.top) continue;
+      auto obj = static_cast<FPDF_PAGEOBJECT>(t.path);
+      if (FPDFPageObj_SetLineJoin(obj, FPDF_LINEJOIN_ROUND)) changed_.push_back(obj);
+    }
+  }
+  ~RoundThinCorners() {
+    for (FPDF_PAGEOBJECT obj : changed_) FPDFPageObj_SetLineJoin(obj, FPDF_LINEJOIN_MITER);
+  }
+  RoundThinCorners(const RoundThinCorners&) = delete;
+  RoundThinCorners& operator=(const RoundThinCorners&) = delete;
+
+private:
+  std::vector<FPDF_PAGEOBJECT> changed_;
+};
 
 // `big`, k times the size, scaled down into `out`: each pixel mostly the average of its k x k
 // block, a little toward the block's darkest, so thin lines keep some of their weight.
@@ -353,14 +398,22 @@ void downsample(const Bitmap& big, int k, Bitmap& out) {
 
 }  // namespace
 
-Document::RenderHints Document::renderHints(void* page) const {
+const Document::RenderHints& Document::renderHints(void* page) const {
   if (auto it = renderHints_.find(page); it != renderHints_.end()) return it->second;
-  RenderHints h;
+  HintsOut out;
   auto p = static_cast<FPDF_PAGE>(page);
-  for (int i = 0, n = FPDFPage_CountObjects(p); i < n; ++i)
-    gatherHints(FPDFPage_GetObject(p, i), 1.0, h.imageDensity, h.hairlineFills, 0);
-  renderHints_[page] = h;
-  return h;
+  for (int i = 0, n = FPDFPage_CountObjects(p); i < n; ++i) {
+    FPDF_PAGEOBJECT obj = FPDFPage_GetObject(p, i);
+    detail::ThinMiter box;
+    if (!FPDFPageObj_GetBounds(obj, &box.left, &box.bottom, &box.right, &box.top))
+      box = {nullptr, 0, -1e9f, -1e9f, 1e9f, 1e9f};  // anywhere
+    gatherHints(obj, 1.0, box, out, 0);
+  }
+  RenderHints h;
+  h.imageDensity = out.density;
+  h.hairlineFills = out.hairlineFills;
+  h.thinMiters = std::move(out.thinMiters);
+  return renderHints_[page] = std::move(h);
 }
 
 Bitmap Document::render(int index, double scale, PixelRect region, unsigned flags) const {
@@ -371,14 +424,20 @@ Bitmap Document::render(int index, double scale, PixelRect region, unsigned flag
   PageHandle page(cachedPage(index));
   if (!page) return {};
   int k = 1;
+  const RenderHints& h = renderHints(page.page);
   if (!(flags & RenderForPrinting)) {
-    const RenderHints h = renderHints(page.page);
     const double ratio = h.imageDensity / scale;  // picture pixels to screen pixels
     if (ratio > 1.25) k = ratio > 2.5 ? 3 : 2;
     if (h.hairlineFills >= 200 && scale < 3) k = std::max(k, 2);
     const double bigPixels = double(region.width) * region.height * k * k;
     if (bigPixels * 4 > 1'500'000'000.0) k = 1;
   }
+  // The region in user space, a little bigger (a corner's pixel).
+  const double margin = 2 / scale;
+  const RectF user = pageFrameOf(static_cast<FPDF_PAGE>(page.page))
+                         .toUser(RectF{region.x / scale - margin, region.y / scale - margin,
+                                       (region.x + region.width) / scale + margin, (region.y + region.height) / scale + margin});
+  const RoundThinCorners corners(h.thinMiters, scale * k, user);
   if (k == 1) return renderAt(page.page, index, scale, region, flags);
   const Bitmap big = renderAt(page.page, index, scale * k,
                               PixelRect{region.x * k, region.y * k, region.width * k, region.height * k}, flags);
@@ -613,7 +672,8 @@ bool Document::addContentImage(int pageIndex, const PageImage& image, const Rect
   const RectF r = rect.normalized();
   if (pageIndex < 0 || pageIndex >= pageCount() || !validImage(image) || r.width() <= 0 || r.height() <= 0) return false;
   std::lock_guard lock(engineMutex());
-  auto page = static_cast<FPDF_PAGE>(cachedPage(pageIndex));
+  // As every edit of the content: all of it written again (see pageForContentEdit).
+  auto page = static_cast<FPDF_PAGE>(pageForContentEdit(pageIndex));
   if (!page) return false;
   FPDF_PAGEOBJECT img = makeImageObject(asDoc(doc_), page, image);
   if (!img) return false;

@@ -83,6 +83,18 @@ enum class Arrange;
 // bytes; undo snapshots are these too).
 using Bytes = std::shared_ptr<const std::vector<std::uint8_t>>;
 
+namespace detail {
+// A thin outline with mitered corners (as AutoCAD's shapes have: triangles, filled and
+// outlined with a zero-width line): the path (FPDF_PAGEOBJECT, on the page or in one of its
+// forms), its width in points, and where it is (the bounds of the page object it's in, in user
+// space). See Document::render().
+struct ThinMiter {
+  void* path = nullptr;
+  double width = 0;
+  float left = 0, bottom = 0, right = 0, top = 0;
+};
+}  // namespace detail
+
 struct OpenResult {
   std::unique_ptr<Document> document;
   OpenError error = OpenError::None;
@@ -264,8 +276,9 @@ private:
   struct RenderHints {
     double imageDensity = 0;  // the sharpest picture's pixels per point
     int hairlineFills = 0;    // shapes filled and outlined with a hairline
+    std::vector<detail::ThinMiter> thinMiters;  // see render()
   };
-  RenderHints renderHints(void* page) const;  // caller holds the engine lock
+  const RenderHints& renderHints(void* page) const;  // caller holds the engine lock
   // render(), at the scale given, as PDFium draws it.
   Bitmap renderAt(void* page, int index, double scale, PixelRect region, unsigned flags) const;
   // The caller holds the engine lock for all of these.

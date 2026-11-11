@@ -533,6 +533,40 @@ TEST_CASE("many small shapes filled and outlined with a hairline don't swell whe
   CHECK(ink > 0.02);
 }
 
+TEST_CASE("a shape outlined with a hairline has no spikes at its sharp corners") {
+  // As AutoCAD writes filled shapes: triangles, filled and outlined with a zero-width line,
+  // mitered. This one's corner at (100, 100) is 12.5 degrees (just inside the miter limit):
+  // PDFium drew the pixel-wide outline's miter there five pixels out past the corner. Drawn
+  // with a round corner now, as Acrobat draws it; the file keeps its miter.
+  const std::string tri = "0 j 10 M 0 w 0 g 0 G 100 100 m 200 100 l 200 122.17 l h b";
+  auto doc = fromStreams({tri}, "0 0 300 200", 0);
+  auto spike = [](const pdfz::Bitmap& bmp) {
+    // Left of the corner (shown at 400, 400 at 4 pixels a point), where the miter pointed.
+    int dark = 0;
+    for (int y = 397; y < 403; ++y)
+      for (int x = 393; x < 399; ++x)
+        if ((bmp.pixel(x, y) & 0xFF) < 230) ++dark;
+    return dark;
+  };
+  for (int pass = 0; pass < 2; ++pass) {  // the second time from the page as it was left
+    CAPTURE(pass);
+    const auto bmp = doc->render(0, 4.0, {0, 0, 1200, 800});
+    REQUIRE(bmp.width == 1200);
+    CHECK(spike(bmp) == 0);
+    CHECK((bmp.pixel(760, 390) & 0xFF) < 60);  // the shape itself, near its far end
+    CHECK((bmp.pixel(404, 399) & 0xFF) < 200);  // and its sharp end
+  }
+  // Moved (its content written again) and saved: still a mitered outline in the file, so
+  // reopened it draws the same.
+  const auto blocks = doc->contentBlocks(0);
+  REQUIRE(blocks.size() == 1);
+  REQUIRE(doc->moveContent(0, blocks[0].objects, 0, 0.5));
+  auto again = reopen(*doc);
+  const auto bmp = again->render(0, 4.0, {0, 0, 1200, 800});
+  CHECK(spike(bmp) == 0);
+  CHECK((bmp.pixel(760, 388) & 0xFF) < 60);
+}
+
 TEST_CASE("edits don't leave the page's old fonts and pictures in the file") {
   // A picture of noise (it doesn't compress) and two lines of text, then the text moved again
   // and again: each edit reads the page through a copy of its resources, and the copies the
