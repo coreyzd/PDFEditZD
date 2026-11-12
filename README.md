@@ -186,6 +186,12 @@ when it writes a page, so untagged, a later edit or saving drew earlier edits' t
 subset's glyphs, garbled. Arial Narrow (whose typographic family is "Arial") is told apart
 from Arial by its width.
 
+PDFium makes an appearance for an annotation that came without one when it draws the page.
+AutoCAD puts an invisible comment, with no appearance, over each piece of SHX text (so the
+text can be searched); saved with PDFium's empty box, Acrobat showed every one with a comment
+icon. Annotations that came without an appearance are saved without one again (pdfz's own
+keep theirs).
+
 PDFium saves every object it has held, used or not, and an edit reads the page through a copy
 of its fonts and pictures, so files grew with every edit. Saving now leaves out the objects
 nothing refers to (the file PDFium wrote is plain enough to go through quickly), so a file

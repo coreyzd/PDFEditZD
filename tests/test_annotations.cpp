@@ -8,6 +8,7 @@
 #include <cmath>
 #include <string>
 
+#include <fpdf_annot.h>
 #include <fpdf_transformpage.h>
 #include <fpdfview.h>
 
@@ -538,4 +539,65 @@ TEST_CASE("hiding an annotation while it's edited") {
   CHECK(countColor(*doc, {18, 18, 122, 122}, {255, 0, 0}) == 0);
   REQUIRE(doc->setAnnotationHidden(0, 0, false));
   CHECK(countColor(*doc, {18, 18, 122, 122}, {255, 0, 0}) > 300);
+}
+
+TEST_CASE("AutoCAD's text comments are saved as they came, without an appearance") {
+  // AutoCAD puts an invisible /Square over each piece of SHX text, with the text, so it can be
+  // searched, and no appearance. PDFium makes one for it (an empty box) when the page is
+  // drawn; saved with that, Acrobat showed every one with a comment icon.
+  std::string pdf = "%PDF-1.7\n";
+  std::vector<std::size_t> offs;
+  auto obj = [&](const std::string& body) {
+    offs.push_back(pdf.size());
+    pdf += std::to_string(offs.size()) + " 0 obj\n" + body + "\nendobj\n";
+  };
+  const std::string draw = "0 0 0 RG 1 w 90 690 m 300 690 l S";
+  obj("<< /Type /Catalog /Pages 2 0 R >>");
+  obj("<< /Type /Pages /Kids [3 0 R] /Count 1 >>");
+  obj("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 800] /Contents 4 0 R /Annots [5 0 R] >>");
+  obj("<< /Length " + std::to_string(draw.size()) + " >>\nstream\n" + draw + "\nendstream");
+  obj("<< /Type /Annot /Subtype /Square /Rect [90 680 300 710] /Border [0 0 0] /C [] /F 4 "
+      "/T (AutoCAD SHX Text) /Contents (10'-6\" LONG SPOOL) >>");
+  const std::size_t xref = pdf.size();
+  pdf += "xref\n0 " + std::to_string(offs.size() + 1) + "\n0000000000 65535 f \n";
+  for (std::size_t o : offs) {
+    char line[24];
+    std::snprintf(line, sizeof line, "%010zu 00000 n \n", o);
+    pdf += line;
+  }
+  pdf += "trailer\n<< /Size " + std::to_string(offs.size() + 1) + " /Root 1 0 R >>\nstartxref\n" + std::to_string(xref) +
+         "\n%%EOF\n";
+  auto [doc, err] = Document::openMemory(std::vector<std::uint8_t>(pdf.begin(), pdf.end()));
+  REQUIRE(doc);
+  // Drawn (PDFium makes the appearance then), and a comment of pdfz's own added.
+  doc->render(0, 1.0, {0, 0, 400, 800});
+  Annotation sq;
+  sq.kind = AnnotKind::Square;
+  sq.rect = {20, 20, 120, 120};
+  sq.color = {255, 0, 0};
+  REQUIRE(doc->addAnnotation(0, sq) >= 0);
+  doc->render(0, 1.0, {0, 0, 400, 800});
+  auto again = reopen(*doc);
+  std::lock_guard lock(pdfz::engineMutex());
+  FPDF_PAGE page = FPDF_LoadPage(static_cast<FPDF_DOCUMENT>(again->handle()), 0);
+  REQUIRE(page);
+  REQUIRE(FPDFPage_GetAnnotCount(page) == 2);
+  int withoutAp = 0, withAp = 0;
+  for (int i = 0; i < 2; ++i) {
+    FPDF_ANNOTATION a = FPDFPage_GetAnnot(page, i);
+    REQUIRE(a);
+    if (FPDFAnnot_HasKey(a, "NM")) {  // pdfz's: its appearance stays
+      CHECK(FPDFAnnot_HasKey(a, "AP"));
+      ++withAp;
+    } else {  // AutoCAD's: as it came
+      CHECK_FALSE(FPDFAnnot_HasKey(a, "AP"));
+      CHECK_FALSE(FPDFAnnot_HasKey(a, "PDFIUM_HasGeneratedAP"));
+      CHECK(FPDFAnnot_HasKey(a, "Contents"));
+      ++withoutAp;
+    }
+    FPDFPage_CloseAnnot(a);
+  }
+  FPDF_ClosePage(page);
+  CHECK(withAp == 1);
+  CHECK(withoutAp == 1);
 }
