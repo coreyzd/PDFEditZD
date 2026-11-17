@@ -1,0 +1,10 @@
+<!DOCTYPE RCC>
+<RCC version="1.0">
+  <qresource prefix="/icon">
+    <file alias="PDFEditZD-16.svg">../icon/PDFEditZD-16.svg</file>
+    <file alias="PDFEditZD-24.svg">../icon/PDFEditZD-24.svg</file>
+    <file alias="PDFEditZD-32.svg">../icon/PDFEditZD-32.svg</file>
+    <file alias="PDFEditZD-48.svg">../icon/PDFEditZD-48.svg</file>
+    <file alias="PDFEditZD-64.svg">../icon/PDFEditZD-64.svg</file>
+  </qresource>
+</RCC>

@@ -8,6 +8,7 @@ add_library(pdfz_core STATIC
   content.cpp
   objects.cpp
   compact.cpp
+  outline.cpp
 )
 target_include_directories(pdfz_core PUBLIC ${PROJECT_SOURCE_DIR}/src)
 target_link_libraries(pdfz_core PUBLIC PDFium::pdfium PRIVATE pdfz_warnings)

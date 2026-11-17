@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "MainWindow.hpp"
+#include "SingleInstance.hpp"
 
 #include "core/engine.hpp"
 
@@ -9,7 +10,10 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QIcon>
 #include <QSettings>
+#include <QSvgRenderer>
+#include <QPainter>
 
 #include <cstdio>
 #include <mutex>
@@ -46,6 +50,24 @@ void startLog() {
   qInstallMessageHandler(logMessage);
 }
 
+// The program's icon, for its windows and the taskbar (the .exe has it too, for Explorer:
+// pdfeditzd.rc): each size drawn from its own SVG, made for that size.
+QIcon appIcon() {
+  QIcon icon;
+  for (int size : {16, 24, 32, 48, 64, 128, 256}) {
+    const int from = size <= 16 ? 16 : size <= 24 ? 24 : size <= 32 ? 32 : size <= 48 ? 48 : 64;
+    QSvgRenderer svg(QStringLiteral(":/icon/PDFEditZD-%1.svg").arg(from));
+    if (!svg.isValid()) continue;
+    QPixmap pm(size, size);
+    pm.fill(Qt::transparent);
+    QPainter p(&pm);
+    svg.render(&p);
+    p.end();
+    icon.addPixmap(pm);
+  }
+  return icon;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -64,15 +86,29 @@ int main(int argc, char** argv) {
   args.addVersionOption();
   args.addPositionalArgument("files", "PDFs to open", "[files...]");
   args.process(app);
+  QStringList files;
+  for (const QString& f : args.positionalArguments()) files << QFileInfo(f).absoluteFilePath();
 
-  // PDFium runs for as long as the app; the window (and every document) closes before it stops.
+  // Running already: it opens them (in tabs), and this one is done.
+  SingleInstance single;
+  if (single.handOff(files)) return 0;
+
+  QApplication::setWindowIcon(appIcon());
+  // PDFium runs for as long as the app; the windows (and every document) close before it stops.
   pdfz::Engine engine;
   int rc = 0;
   {
-    MainWindow window;
-    window.show();
-    for (const QString& file : args.positionalArguments()) window.openFile(file);
+    auto* window = new MainWindow;
+    window->setAttribute(Qt::WA_DeleteOnClose);
+    window->show();
+    MainWindow::openFromOutside(files);
+    QObject::connect(&single, &SingleInstance::filesReceived, &app, &MainWindow::openFromOutside, Qt::QueuedConnection);
     rc = QApplication::exec();
+    // Windows closed but not yet deleted (they go once the event loop gets to them), then any
+    // still open: before PDFium stops.
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+    for (QWidget* w : QApplication::topLevelWidgets())
+      if (qobject_cast<MainWindow*>(w)) delete w;
   }
   return rc;
 }

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include <doctest.h>
 
+#include "core/content.hpp"
 #include "core/document.hpp"
 #include "core/engine.hpp"
 
@@ -321,4 +322,132 @@ TEST_CASE("pages made from pictures") {
   pdfz::Document::PageImage empty;
   CHECK(!doc->insertImagePage(0, {612, 792}, empty));
   CHECK(doc->pageCount() == 2);
+}
+
+namespace {
+
+// A PDF of these objects (numbered from 1; 1 is the catalog), as text.
+std::vector<std::uint8_t> rawPdf(const std::vector<std::string>& objects) {
+  std::string pdf = "%PDF-1.7\n";
+  std::vector<std::size_t> offs;
+  for (const std::string& body : objects) {
+    offs.push_back(pdf.size());
+    pdf += std::to_string(offs.size()) + " 0 obj\n" + body + "\nendobj\n";
+  }
+  const std::size_t xref = pdf.size();
+  pdf += "xref\n0 " + std::to_string(offs.size() + 1) + "\n0000000000 65535 f \n";
+  for (std::size_t o : offs) {
+    char line[24];
+    std::snprintf(line, sizeof line, "%010zu 00000 n \n", o);
+    pdf += line;
+  }
+  pdf += "trailer\n<< /Size " + std::to_string(offs.size() + 1) + " /Root 1 0 R >>\nstartxref\n" + std::to_string(xref) +
+         "\n%%EOF\n";
+  return {pdf.begin(), pdf.end()};
+}
+
+std::string stream(const std::string& data) {
+  return "<< /Length " + std::to_string(data.size()) + " >>\nstream\n" + data + "\nendstream";
+}
+
+int darkPixels(const Document& d, int page, pdfz::PixelRect r) {
+  const auto bmp = d.render(page, 1.0, r);
+  int n = 0;
+  for (int y = 0; y < bmp.height; ++y)
+    for (int x = 0; x < bmp.width; ++x)
+      if ((bmp.pixel(x, y) & 0xFF) < 128) ++n;
+  return n;
+}
+
+}  // namespace
+
+TEST_CASE("bookmarks: titles, pages and where on them, nested") {
+  // Two pages; "Chapter" goes to page 2 (300 points from its bottom, of 400), with a child
+  // going to page 1.
+  auto bytes = rawPdf({
+      "<< /Type /Catalog /Pages 2 0 R /Outlines 5 0 R >>",
+      "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>",
+      "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 400] >>",
+      "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 400] >>",
+      "<< /Type /Outlines /First 6 0 R /Last 6 0 R /Count 2 >>",
+      "<< /Title (Chapter) /Parent 5 0 R /Dest [4 0 R /XYZ 0 300 0] /First 7 0 R /Last 7 0 R /Count 1 >>",
+      "<< /Title (Section) /Parent 6 0 R /Dest [3 0 R /Fit] >>",
+  });
+  auto [doc, err] = Document::openMemory(bytes);
+  REQUIRE(doc);
+  const auto marks = doc->bookmarks();
+  REQUIRE(marks.size() == 1);
+  CHECK(marks[0].title == "Chapter");
+  CHECK(marks[0].page == 1);
+  CHECK(std::abs(marks[0].top - 100) < 0.01);
+  REQUIRE(marks[0].children.size() == 1);
+  CHECK(marks[0].children[0].title == "Section");
+  CHECK(marks[0].children[0].page == 0);
+  auto [none, err2] = Document::openMemory(rawPdf({"<< /Type /Catalog /Pages 2 0 R >>",
+                                                    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+                                                    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 400] >>"}));
+  REQUIRE(none);
+  CHECK(none->bookmarks().empty());
+}
+
+TEST_CASE("attachments: added, read, saved and removed") {
+  auto doc = Document::create();
+  REQUIRE(doc->insertBlankPage(0, {200, 200}));
+  CHECK(doc->attachments().empty());
+  const std::vector<std::uint8_t> data = {'h', 'e', 'l', 'l', 'o'};
+  REQUIRE(doc->addAttachment("notes.txt", data));
+  CHECK_FALSE(doc->addAttachment("notes.txt", data));  // the name is taken
+  auto [again, err] = Document::openMemory(doc->saveToMemory());
+  REQUIRE(again);
+  const auto list = again->attachments();
+  REQUIRE(list.size() == 1);
+  CHECK(list[0].name == "notes.txt");
+  CHECK(list[0].size == 5);
+  std::vector<std::uint8_t> read;
+  REQUIRE(again->attachmentData(0, read));
+  CHECK(read == data);
+  REQUIRE(again->removeAttachment(0));
+  auto [after, err2] = Document::openMemory(again->saveToMemory());
+  REQUIRE(after);
+  CHECK(after->attachments().empty());
+}
+
+TEST_CASE("layers: listed from the content, turned off and on when drawn, never changed in the file") {
+  // A square on layer "Steel" and one on layer "Text", as AutoCAD marks them.
+  const std::string content =
+      "/OC /oc1 BDC 0 g 20 20 60 60 re f EMC\n"
+      "/OC /oc2 BDC 0 g 120 20 60 60 re f EMC";
+  auto bytes = rawPdf({
+      "<< /Type /Catalog /Pages 2 0 R /OCProperties << /OCGs [5 0 R 6 0 R] /D << /Order [5 0 R 6 0 R] >> >> >>",
+      "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+      "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] /Contents 4 0 R "
+      "/Resources << /Properties << /oc1 5 0 R /oc2 6 0 R >> >> >>",
+      stream(content),
+      "<< /Type /OCG /Name (Steel) >>",
+      "<< /Type /OCG /Name (Text) >>",
+  });
+  auto [doc, err] = Document::openMemory(bytes);
+  REQUIRE(doc);
+  CHECK(doc->layers() == std::vector<std::string>{"Steel", "Text"});
+  const pdfz::PixelRect left{20, 20, 60, 60}, right{120, 20, 60, 60};
+  CHECK(darkPixels(*doc, 0, left) > 3000);
+  CHECK(darkPixels(*doc, 0, right) > 3000);
+  doc->setLayerVisible("Steel", false);
+  CHECK(darkPixels(*doc, 0, left) == 0);
+  CHECK(darkPixels(*doc, 0, right) > 3000);
+  CHECK_FALSE(doc->modified());
+  // Saved (and edited: the page's content written again) with the layer off: still there.
+  REQUIRE(doc->addAttachment("x.txt", {'x'}));
+  std::vector<int> rightSquare;
+  for (const auto& b : doc->contentBlocks(0))
+    if (b.rect.left > 100) rightSquare = b.objects;
+  REQUIRE_FALSE(rightSquare.empty());
+  REQUIRE(doc->moveContent(0, rightSquare, 0, 1));
+  CHECK(darkPixels(*doc, 0, left) == 0);  // still off
+  auto [saved, err2] = Document::openMemory(doc->saveToMemory());
+  REQUIRE(saved);
+  CHECK(darkPixels(*saved, 0, left) > 3000);
+  CHECK(saved->hiddenLayers().empty());
+  doc->setLayerVisible("Steel", true);
+  CHECK(darkPixels(*doc, 0, left) > 3000);
 }

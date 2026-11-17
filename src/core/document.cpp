@@ -306,10 +306,29 @@ struct HintsOut {
   double density = 0;
   int hairlineFills = 0;
   std::vector<detail::ThinMiter> thinMiters;
+  std::map<std::string, std::vector<void*>> layerObjects;
 };
+
+// The layers (optional content groups) an object is marked as part of: "/OC /oc1 BDC" in the
+// content, /oc1 being the group in the page's resources, and its /Name the layer's.
+void layersOf(FPDF_PAGEOBJECT obj, std::map<std::string, std::vector<void*>>& out) {
+  for (int i = 0, n = FPDFPageObj_CountMarks(obj); i < n; ++i) {
+    FPDF_PAGEOBJECTMARK mark = FPDFPageObj_GetMark(obj, i);
+    unsigned short buf[256];
+    unsigned long len = 0;
+    // (A name or value longer than the buffer isn't copied into it.)
+    if (!mark || !FPDFPageObjMark_GetName(mark, buf, sizeof buf, &len) || len != 6 || buf[0] != 'O' || buf[1] != 'C')
+      continue;
+    if (!FPDFPageObjMark_GetParamStringValue(mark, "Name", buf, sizeof buf, &len) || len < 4 || len > sizeof buf) continue;
+    const std::string name = utf16ToUtf8(buf, std::min<std::size_t>(len / 2 - 1, 255));
+    auto& objs = out[name];
+    if (objs.empty() || objs.back() != obj) objs.push_back(obj);
+  }
+}
 
 // `box`: the bounds of the page object `obj` is (or is in).
 void gatherHints(FPDF_PAGEOBJECT obj, double formScale, const detail::ThinMiter& box, HintsOut& out, int depth) {
+  if (FPDFPageObj_CountMarks(obj) > 0) layersOf(obj, out.layerObjects);
   const int type = FPDFPageObj_GetType(obj);
   if (type == FPDF_PAGEOBJ_FORM) {
     if (depth > 8) return;
@@ -343,6 +362,31 @@ void gatherHints(FPDF_PAGEOBJECT obj, double formScale, const detail::ThinMiter&
     out.thinMiters.push_back(t);
   }
 }
+
+// While a page is drawn: the layers turned off left out (made inactive, and active again
+// after, so nothing else, editing least of all, sees a difference).
+class HideLayers {
+public:
+  HideLayers(const std::map<std::string, std::vector<void*>>& layers, const std::set<std::string>& hidden) {
+    for (const std::string& name : hidden) {
+      const auto it = layers.find(name);
+      if (it == layers.end()) continue;
+      for (void* o : it->second) {
+        auto obj = static_cast<FPDF_PAGEOBJECT>(o);
+        FPDF_BOOL active = false;
+        if (FPDFPageObj_GetIsActive(obj, &active) && active && FPDFPageObj_SetIsActive(obj, false)) changed_.push_back(obj);
+      }
+    }
+  }
+  ~HideLayers() {
+    for (FPDF_PAGEOBJECT obj : changed_) FPDFPageObj_SetIsActive(obj, true);
+  }
+  HideLayers(const HideLayers&) = delete;
+  HideLayers& operator=(const HideLayers&) = delete;
+
+private:
+  std::vector<FPDF_PAGEOBJECT> changed_;
+};
 
 // While a page is drawn: round corners for the outlines PDFium draws a pixel wide (any thinner
 // than that), put back as they were after. A mitered corner of a pixel-wide line sticks out up
@@ -413,6 +457,7 @@ const Document::RenderHints& Document::renderHints(void* page) const {
   h.imageDensity = out.density;
   h.hairlineFills = out.hairlineFills;
   h.thinMiters = std::move(out.thinMiters);
+  h.layerObjects = std::move(out.layerObjects);
   return renderHints_[page] = std::move(h);
 }
 
@@ -438,6 +483,7 @@ Bitmap Document::render(int index, double scale, PixelRect region, unsigned flag
                          .toUser(RectF{region.x / scale - margin, region.y / scale - margin,
                                        (region.x + region.width) / scale + margin, (region.y + region.height) / scale + margin});
   const RoundThinCorners corners(h.thinMiters, scale * k, user);
+  const HideLayers hidden(h.layerObjects, hiddenLayers_);
   if (k == 1) return renderAt(page.page, index, scale, region, flags);
   const Bitmap big = renderAt(page.page, index, scale * k,
                               PixelRect{region.x * k, region.y * k, region.width * k, region.height * k}, flags);

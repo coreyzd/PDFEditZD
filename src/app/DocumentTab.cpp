@@ -133,7 +133,7 @@ bool DocumentTab::applyEdit(const QString& label, int page, Scope scope,
   return true;
 }
 
-void DocumentTab::refresh(Scope scope, int page, int pageToShow) {
+void DocumentTab::refresh(Scope scope, int page, int pageToShow, bool keepView) {
   if (scope == Scope::Field) {
     // The field may be shown on other pages too (those looked at so far are known).
     std::vector<int> pages = {page};
@@ -182,15 +182,18 @@ void DocumentTab::refresh(Scope scope, int page, int pageToShow) {
   thumbs_->documentChanged();
   comments_->setDocument(doc_);
   view_->documentChanged(true);
-  view_->goToPage(std::clamp(pageToShow, 0, doc_->pageCount() - 1));
+  const int show = std::clamp(pageToShow, 0, doc_->pageCount() - 1);
+  if (!keepView || !view_->isPageVisible(show)) view_->goToPage(show);
   emit stateChanged();
   emit contentChanged(true);
 }
 
 void DocumentTab::showDocument(std::shared_ptr<pdfz::Document> doc, int pageToShow) {
+  if (doc_ && doc) doc->setHiddenLayers(doc_->hiddenLayers());  // a way of looking at it, kept
   doc_ = std::move(doc);
   renderer_->setDocument(doc_);
-  refresh(Scope::Pages, pageToShow, pageToShow);
+  // Undo and redo leave the view where it is, unless what changed is out of sight.
+  refresh(Scope::Pages, pageToShow, pageToShow, true);
 }
 
 void DocumentTab::undo() {
@@ -331,6 +334,15 @@ void DocumentTab::setFieldChecked(int page, int index, bool checked) {
 
 void DocumentTab::setFieldChoice(int page, int index, int option) {
   fillField(page, index, [&](pdfz::Document& d) { return d.setFieldChoice(page, index, option); });
+}
+
+void DocumentTab::layersChanged() {
+  if (!doc_) return;
+  for (int p = 0; p < doc_->pageCount(); ++p) {
+    renderer_->invalidatePage(p);
+    thumbs_->pageChanged(p);
+  }
+  view_->viewport()->update();
 }
 
 void DocumentTab::refreshRendering(int page) {

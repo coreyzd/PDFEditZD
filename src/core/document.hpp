@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <map>
+#include <optional>
 #include <memory>
 #include <set>
 #include <shared_mutex>
@@ -258,6 +259,36 @@ public:
   // True after any page edit, until the next successful save().
   bool modified() const { return modified_; }
 
+  // Bookmarks (the document's outline), as a tree: each one's title, and the page it goes to
+  // (-1 for none) and where on it (`top`, display points from the page's top; -1 for the top).
+  struct Bookmark {
+    std::string title;  // UTF-8
+    int page = -1;
+    double top = -1;
+    std::vector<Bookmark> children;
+  };
+  std::vector<Bookmark> bookmarks() const;
+
+  // Files attached to the document (its embedded files).
+  struct Attachment {
+    std::string name;         // the file name, UTF-8
+    std::string description;  // UTF-8
+    std::size_t size = 0;     // bytes
+  };
+  std::vector<Attachment> attachments() const;
+  bool attachmentData(int index, std::vector<std::uint8_t>& out) const;
+  // Attaches a file (an edit). False if one of that name is there already, or on failure.
+  bool addAttachment(const std::string& name, const std::vector<std::uint8_t>& data);
+  bool removeAttachment(int index);
+
+  // Layers (optional content groups), by name, as the pages' content uses them (sorted). A
+  // layer turned off isn't drawn (on screen, in thumbnails, or printed); this is a way of
+  // looking at the document, not an edit, and isn't saved.
+  std::vector<std::string> layers() const;
+  void setLayerVisible(const std::string& name, bool visible);
+  std::set<std::string> hiddenLayers() const;
+  void setHiddenLayers(std::set<std::string> names);  // (carried over to an undo step's document)
+
   // The raw handle, for code that adds features on top of pdfz (annotations, forms). Lock
   // engineMutex() around every use of it.
   void* handle() const { return doc_; }
@@ -271,12 +302,15 @@ private:
     modified_ = true;
     edited_ = true;
     renderHints_.clear();
+    layerNames_.reset();
   }
   // What a page holds that PDFium draws poorly at low resolution (see render()).
   struct RenderHints {
     double imageDensity = 0;  // the sharpest picture's pixels per point
     int hairlineFills = 0;    // shapes filled and outlined with a hairline
     std::vector<detail::ThinMiter> thinMiters;  // see render()
+    // The objects in each layer (FPDF_PAGEOBJECT: on the page, or the forms on it).
+    std::map<std::string, std::vector<void*>> layerObjects;
   };
   const RenderHints& renderHints(void* page) const;  // caller holds the engine lock
   // render(), at the scale given, as PDFium draws it.
@@ -310,6 +344,8 @@ private:
   mutable std::vector<std::pair<int, void*>> pages_;  // page index, FPDF_PAGE; most recent first
   mutable std::set<int> needsAppearances_;            // pages with changed annotations
   mutable std::map<void*, RenderHints> renderHints_;   // by FPDF_PAGE, while it's cached
+  mutable std::optional<std::vector<std::string>> layerNames_;  // all pages' layers, once read
+  std::set<std::string> hiddenLayers_;
   // Page sizes, read without the engine lock (the UI lays pages out while a worker renders).
   mutable std::shared_mutex sizesMutex_;
   std::vector<SizeF> sizes_;

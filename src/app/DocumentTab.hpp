@@ -91,6 +91,9 @@ public:
   bool pasteAnnotations(int page);
   static bool hasAnnotationsToPaste();
 
+  // Layers were turned on or off: every page drawn again.
+  void layersChanged();
+
   // Edit PDF: a picture added to the page's content, filling `rect` (display frame); it's then
   // selected.
   void addContentImage(int page, const pdfz::Document::PageImage& image, const pdfz::RectF& rect);
@@ -112,7 +115,9 @@ signals:
   void statusMessage(const QString& text, int timeoutMs);
 
 private:
-  void refresh(Scope scope, int page, int pageToShow);
+  // `keepView`: the pages stay where they are on the screen (undo, redo) if `pageToShow` is
+  // in view.
+  void refresh(Scope scope, int page, int pageToShow, bool keepView = false);
   void showDocument(std::shared_ptr<pdfz::Document> doc, int pageToShow);  // undo/redo swap
   QString kindLabel(const pdfz::Annotation& a) const;
   bool fillField(int page, int index, const std::function<bool(pdfz::Document&)>& change);

@@ -416,6 +416,77 @@ QIcon fitWidthIcon(const QPalette& palette) {
   });
 }
 
+QIcon actualSizeIcon(const QPalette& palette) {
+  return drawnIcon(palette, 20, [&](QPainter& p, const QColor& ink, bool) {
+    p.setPen(QPen(ink, 1.2, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    p.drawRoundedRect(QRectF(2.5, 4, 15, 12), 1.5, 1.5);
+    QFont f = p.font();
+    f.setPixelSize(8);
+    f.setBold(true);
+    p.setFont(f);
+    p.drawText(QRectF(2.5, 4, 15, 12), Qt::AlignCenter, QStringLiteral("1:1"));
+  });
+}
+
+QIcon panelIcon(int which, const QPalette& palette) {
+  return drawnIcon(palette, 24, [&](QPainter& p, const QColor& ink, bool) {
+    p.setPen(QPen(ink, 1.4, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    p.setBrush(Qt::NoBrush);
+    switch (which) {
+      case 0: {  // two pages, one over the other
+        p.drawRect(QRectF(5.5, 3.5, 10, 13));
+        QPainterPath back;
+        back.moveTo(8.5, 19.5);
+        back.lineTo(18.5, 19.5);
+        back.lineTo(18.5, 6.5);
+        p.drawPath(back);
+        break;
+      }
+      case 1: {  // a bookmark ribbon
+        QPainterPath r;
+        r.moveTo(7, 3.5);
+        r.lineTo(17, 3.5);
+        r.lineTo(17, 20.5);
+        r.lineTo(12, 16);
+        r.lineTo(7, 20.5);
+        r.closeSubpath();
+        p.drawPath(r);
+        break;
+      }
+      case 2: {  // a paper clip
+        QPainterPath c;
+        c.moveTo(15.5, 9);
+        c.lineTo(15.5, 17);
+        c.arcTo(QRectF(8.5, 14, 7, 7), 0, -180);
+        c.lineTo(8.5, 6.5);
+        c.arcTo(QRectF(8.5, 2.5, 5, 5), 180, -180);
+        c.lineTo(13.5, 16.5);
+        c.arcTo(QRectF(10.5, 15, 3, 3), 0, -180);
+        c.lineTo(10.5, 8);
+        p.drawPath(c);
+        break;
+      }
+      default: {  // layers: three sheets, stacked
+        for (int i = 0; i < 3; ++i) {
+          const double y = 7 + i * 4.5;
+          QPolygonF d;
+          d << QPointF(12, y - 4) << QPointF(20, y) << QPointF(12, y + 4) << QPointF(4, y);
+          if (i == 0) {
+            p.drawPolygon(d);
+          } else {  // only the front edges show
+            QPainterPath e;
+            e.moveTo(4, y);
+            e.lineTo(12, y + 4);
+            e.lineTo(20, y);
+            p.drawPath(e);
+          }
+        }
+        break;
+      }
+    }
+  });
+}
+
 QCursor crosshairCursor(qreal dpr) {
   static std::map<int, QCursor> cache;
   const int key = int(std::lround(dpr * 100));

@@ -162,6 +162,22 @@ void DocumentView::goToPage(int page) {
   }
 }
 
+void DocumentView::goToPoint(int page, double top) {
+  if (page < 0 || page >= int(pageRects_.size())) return;
+  if (top < 0) {
+    goToPage(page);
+    return;
+  }
+  const double ppp = pagePixelsPerPoint(page);
+  verticalScrollBar()->setValue(int(std::lround(pageRects_[std::size_t(page)].top() + top * ppp - kMargin)));
+  updateCurrentPage();
+}
+
+bool DocumentView::isPageVisible(int page) const {
+  if (page < 0 || page >= int(pageRects_.size())) return false;
+  return visibleRect().intersects(pageRects_[std::size_t(page)]);
+}
+
 void DocumentView::setZoom(double zoom) {
   applyZoom(zoom, FitMode::None, viewport()->rect().center());
 }

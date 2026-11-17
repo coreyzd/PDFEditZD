@@ -1,5 +1,8 @@
 cmake_minimum_required(VERSION 3.24)
 project(PDFEditZD VERSION 0.1.0 LANGUAGES CXX)
+if(WIN32)
+  enable_language(RC)  # the program's icon and version information (src/app/pdfeditzd.rc.in)
+endif()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

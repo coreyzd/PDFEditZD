@@ -1,7 +1,9 @@
 set(CMAKE_AUTOMOC ON)
+set(CMAKE_AUTORCC ON)
 
 # Qt SVG reads SVG files for stamps and signatures (MSYS2: mingw-w64-ucrt-x86_64-qt6-svg).
-find_package(Qt6 6.4 REQUIRED COMPONENTS Core Gui Widgets PrintSupport Svg)
+# Qt Network: a second start hands its files to the copy already running (QLocalSocket).
+find_package(Qt6 6.4 REQUIRED COMPONENTS Core Gui Widgets PrintSupport Svg Network)
 
 add_executable(pdfeditzd
   main.cpp
@@ -29,10 +31,20 @@ add_executable(pdfeditzd
   CommentDialog.cpp
   CommentsPanel.cpp
   ToolIcons.cpp
+  SidePanels.cpp
+  DocumentTabs.cpp
+  SingleInstance.cpp
+  resources.qrc  # the icon's SVGs, for the windows
 )
 target_compile_definitions(pdfeditzd PRIVATE PDFZ_VERSION="${PROJECT_VERSION}")
 if(WIN32)
   set_target_properties(pdfeditzd PROPERTIES WIN32_EXECUTABLE ON)  # a GUI program: no console window
+  # The icon and the version information in the .exe, for Explorer, the taskbar's pinned
+  # button and "Open with" (src/icon/PDFEditZD.ico; the windows take theirs from the SVGs).
+  string(REPLACE "." "," PDFZ_VERSION_COMMAS "${PROJECT_VERSION}")
+  set(PDFZ_ICON_FILE "${PROJECT_SOURCE_DIR}/src/icon/PDFEditZD.ico")
+  configure_file(pdfeditzd.rc.in "${CMAKE_CURRENT_BINARY_DIR}/pdfeditzd.rc" @ONLY)
+  target_sources(pdfeditzd PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/pdfeditzd.rc")
   if(MSVC)
     # MSVC's CRT reads char strings in the ANSI code page; the manifest makes that UTF-8.
     # (MinGW links a default manifest of its own and pdfz passes paths as UTF-16 anyway.)
@@ -41,7 +53,7 @@ if(WIN32)
 endif()
 
 target_link_libraries(pdfeditzd PRIVATE pdfz_core pdfz_warnings
-  Qt6::Core Qt6::Gui Qt6::Widgets Qt6::PrintSupport Qt6::Svg)
+  Qt6::Core Qt6::Gui Qt6::Widgets Qt6::PrintSupport Qt6::Svg Qt6::Network)
 if(WIN32)
   target_link_libraries(pdfeditzd PRIVATE winspool gdi32)  # WinPrint: printing through the Windows API
 endif()

@@ -3,9 +3,11 @@
 
 #include "CommentsPanel.hpp"
 #include "DocumentTab.hpp"
+#include "DocumentTabs.hpp"
 #include "FindBar.hpp"
 #include "OfficeImport.hpp"
 #include "Printing.hpp"
+#include "SidePanels.hpp"
 #include "SignatureDialog.hpp"
 #include "TextSearch.hpp"
 #include "ThumbnailPanel.hpp"
@@ -26,7 +28,10 @@
 #include <QDialogButtonBox>
 #include <QFormLayout>
 #include <QDockWidget>
+#include <QDrag>
 #include <QDragEnterEvent>
+#include <QDir>
+#include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QImageReader>
@@ -62,10 +67,15 @@
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
+#include <set>
 
 namespace {
 
 constexpr int kMaxRecent = 10;
+// What connectTab adds to a tab's widgets for this window (taken off again when the tab moves
+// to another window).
+const char* const kWindowShortcut = "pdfz-window-shortcut";
+QPointer<MainWindow> g_lastActive;  // the window used last, for files from outside
 const char* const kPdfFilter = QT_TRANSLATE_NOOP("MainWindow", "PDF documents (*.pdf);;All files (*)");
 
 std::filesystem::path toFsPath(const QString& s) { return std::filesystem::path(s.toStdU16String()); }
@@ -155,7 +165,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
   // The center: a welcome page while nothing is open, the document tabs otherwise.
   findBar_ = new FindBar(this);
   findBar_->hide();
-  tabs_ = new QTabWidget(this);
+  tabs_ = new DocumentTabWidget(this);
   tabs_->setDocumentMode(true);
   tabs_->setTabsClosable(true);
   tabs_->setMovable(true);
@@ -173,12 +183,29 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
   central_->addWidget(docs);
   setCentralWidget(central_);
 
+  // The side panel: the page thumbnails, or the bookmarks, attachments or layers.
   thumbsStack_ = new QStackedWidget(this);
-  thumbsDock_ = new QDockWidget(tr("Pages"), this);
+  bookmarks_ = new BookmarksPanel(this);
+  attachments_ = new AttachmentsPanel(this);
+  layers_ = new LayersPanel(this);
+  sideStack_ = new QStackedWidget(this);
+  for (QWidget* w : std::initializer_list<QWidget*>{thumbsStack_, bookmarks_, attachments_, layers_}) sideStack_->addWidget(w);
+  thumbsDock_ = new QDockWidget(tr("Page Thumbnails"), this);
   thumbsDock_->setObjectName("pagesDock");
-  thumbsDock_->setWidget(thumbsStack_);
+  thumbsDock_->setWidget(sideStack_);
   thumbsDock_->setFeatures(QDockWidget::DockWidgetClosable | QDockWidget::DockWidgetMovable);
   addDockWidget(Qt::LeftDockWidgetArea, thumbsDock_);
+  connect(bookmarks_, &BookmarksPanel::goTo, this, [this](int page, double top) {
+    if (DocumentTab* t = tab()) {
+      t->view()->goToPoint(page, top);
+      t->view()->setFocus();
+    }
+  });
+  connect(attachments_, &AttachmentsPanel::addRequested, this, &MainWindow::attachFiles);
+  connect(attachments_, &AttachmentsPanel::removeRequested, this, &MainWindow::removeAttachment);
+  connect(layers_, &LayersPanel::layersChanged, this, [this] {
+    if (DocumentTab* t = tab()) t->layersChanged();
+  });
 
   commentsStack_ = new QStackedWidget(this);
   commentsDock_ = new QDockWidget(tr("Comments"), this);
@@ -195,6 +222,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
   statusBar()->addPermanentWidget(pageSizeLabel_);
 
   connect(tabs_, &QTabWidget::currentChanged, this, &MainWindow::onCurrentTabChanged);
+  connect(tabs_->bar(), &DocumentTabBar::tabDraggedOff, this, &MainWindow::dragTabOff);
   connect(tabs_, &QTabWidget::tabCloseRequested, this, [this](int i) {
     if (auto* t = qobject_cast<DocumentTab*>(tabs_->widget(i))) closeTab(t);
   });
@@ -212,6 +240,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
   QSettings s;
   if (!restoreGeometry(s.value("window/geometry").toByteArray())) resize(1200, 860);
   restoreState(s.value("window/state").toByteArray());
+  showSidePanel(thumbsDock_->isHidden() ? -1 : std::clamp(s.value("window/sidePanel", 0).toInt(), 0, 3));
   if (!s.contains("window/state")) commentsDock_->hide();  // shown when wanted (View > Comments)
   editBar_->hide();  // until Edit PDF is picked
 
@@ -219,6 +248,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 }
 
 void MainWindow::changeEvent(QEvent* e) {
+  if (e->type() == QEvent::ActivationChange && isActiveWindow()) g_lastActive = this;
   if (e->type() == QEvent::WindowStateChange && fullScreenAct_) {
     fullScreenAct_->setChecked(isFullScreen());
     setFullScreenChrome(isFullScreen());
@@ -289,11 +319,14 @@ void MainWindow::connectTab(DocumentTab* t) {
   DocumentView* v = t->view();
   connect(t, &DocumentTab::stateChanged, this, [this, t] {
     updateTabTitle(t);
-    if (t == tab()) updateUi();
+    if (t != tab()) return;
+    updateUi();
+    updateSidePanel(false);  // (undo and redo bring another document)
   });
   connect(t, &DocumentTab::statusMessage, this, [this](const QString& m, int ms) { statusBar()->showMessage(m, ms); });
   connect(t, &DocumentTab::contentChanged, this, [this, t](bool pages) {
     if (t != tab() || !pages) return;
+    updateSidePanel(true);
     if (findBar_->isVisible() && !findBar_->text().isEmpty()) restartSearch();
     else t->search()->clear();
   });
@@ -358,6 +391,7 @@ void MainWindow::connectTab(DocumentTab* t) {
   // V selects, H is the hand, like Acrobat: only while the pages have the keyboard.
   for (auto [key, act] : {std::pair{Qt::Key_V, selectToolAct_}, std::pair{Qt::Key_H, handToolAct_}}) {
     auto* sc = new QShortcut(QKeySequence(key), v, nullptr, nullptr, Qt::WidgetWithChildrenShortcut);
+    sc->setObjectName(kWindowShortcut);
     connect(sc, &QShortcut::activated, act, &QAction::trigger);
   }
 
@@ -367,11 +401,125 @@ void MainWindow::connectTab(DocumentTab* t) {
           [this, t](const std::vector<int>& pages, int before) { movePages(t, pages, before); });
   // Delete in the thumbnails deletes the selected pages (in the page view, the selected comment).
   auto* del = new QShortcut(QKeySequence::Delete, th, nullptr, nullptr, Qt::WidgetWithChildrenShortcut);
+  del->setObjectName(kWindowShortcut);
   connect(del, &QShortcut::activated, this, &MainWindow::deletePages);
 
   TextSearch* s = t->search();
   connect(s, &TextSearch::matchesChanged, this, [this, t] { onSearchMatches(t, false); });
   connect(s, &TextSearch::finished, this, [this, t] { onSearchMatches(t, true); });
+}
+
+int MainWindow::tabCount() const { return tabs_->count(); }
+
+QList<MainWindow*> MainWindow::windows() {
+  QList<MainWindow*> out;
+  for (QWidget* w : QApplication::topLevelWidgets())
+    if (auto* mw = qobject_cast<MainWindow*>(w); mw && mw->isVisible()) out << mw;  // (not one closed, going away)
+  return out;
+}
+
+void MainWindow::openFromOutside(const QStringList& paths) {
+  QList<MainWindow*> all = windows();
+  MainWindow* target = g_lastActive && all.contains(g_lastActive.data()) ? g_lastActive.data() : nullptr;
+  if (!target && !all.isEmpty()) target = all.front();
+  if (!target) {
+    target = new MainWindow;
+    target->setAttribute(Qt::WA_DeleteOnClose);
+    target->show();
+    all << target;
+  }
+  MainWindow* shown = target;
+  for (const QString& p : paths) {
+    const QString abs = QFileInfo(p).absoluteFilePath();
+    MainWindow* has = nullptr;
+    for (MainWindow* w : all)
+      if (DocumentTab* t = w->tabFor(abs)) {
+        w->tabs_->setCurrentWidget(t);
+        has = w;
+        break;
+      }
+    if (has) shown = has;
+    else if (target->openFile(abs)) shown = target;
+  }
+  // To the front (Windows lets it: the copy started with the files allowed it).
+  shown->setWindowState((shown->windowState() & ~Qt::WindowMinimized) | Qt::WindowActive);
+  shown->show();
+  shown->raise();
+  shown->activateWindow();
+}
+
+void MainWindow::releaseTab(DocumentTab* t) {
+  const int i = tabs_->indexOf(t);
+  if (i < 0) return;
+  t->finishTextEditing();
+  DocumentView* v = t->view();
+  for (QObject* o : std::initializer_list<QObject*>{t, v, t->thumbnails(), t->comments(), t->search()})
+    disconnect(o, nullptr, this, nullptr);
+  for (QWidget* w : std::initializer_list<QWidget*>{v, t->thumbnails()})
+    for (QShortcut* sc : w->findChildren<QShortcut*>(kWindowShortcut, Qt::FindDirectChildrenOnly)) delete sc;
+  v->removeAction(smallerAct_);
+  v->removeAction(largerAct_);
+  tabs_->removeTab(i);
+  t->setParent(nullptr);
+  thumbsStack_->removeWidget(t->thumbnails());
+  t->thumbnails()->setParent(nullptr);
+  commentsStack_->removeWidget(t->comments());
+  t->comments()->setParent(nullptr);
+  onCurrentTabChanged();
+}
+
+void MainWindow::adoptTab(DocumentTab* t, int index) {
+  thumbsStack_->addWidget(t->thumbnails());
+  commentsStack_->addWidget(t->comments());
+  connectTab(t);
+  const int i = index >= 0 ? tabs_->insertTab(index, t, t->displayName()) : tabs_->addTab(t, t->displayName());
+  updateTabTitle(t);
+  tabs_->setCurrentIndex(i);
+  onCurrentTabChanged();
+}
+
+// The tab goes with the mouse, as a picture of its page: dropped on one of this program's
+// windows, it moves there (on this one, it stays); dropped anywhere else, it gets a window of
+// its own there (a window's only tab: the window moves there instead).
+void MainWindow::dragTabOff(int index) {
+  auto* t = qobject_cast<DocumentTab*>(tabs_->widget(index));
+  if (!t) return;
+  t->finishTextEditing();
+  auto* mime = new QMimeData;
+  mime->setData(kTabMime, QByteArray::number(qulonglong(reinterpret_cast<quintptr>(t))));
+  auto* drag = new QDrag(this);
+  drag->setMimeData(mime);
+  QPixmap shot = t->view()->viewport()->grab();
+  if (!shot.isNull()) {
+    shot = shot.scaledToWidth(std::min(260, std::max(1, shot.width())), Qt::SmoothTransformation);
+    QPixmap faded(shot.size());
+    faded.fill(Qt::transparent);
+    QPainter p(&faded);
+    p.setOpacity(0.75);
+    p.drawPixmap(0, 0, shot);
+    p.end();
+    drag->setPixmap(faded);
+    drag->setHotSpot(QPoint(faded.width() / 2, 12));
+  }
+  const QPointer<DocumentTab> guard(t);
+  const Qt::DropAction done = drag->exec(Qt::MoveAction, Qt::MoveAction);
+  if (done != Qt::MoveAction && guard && tabs_->indexOf(t) >= 0) {
+    const QPoint at = QCursor::pos() - QPoint(120, 12);
+    if (tabs_->count() == 1) {
+      if (!isMaximized() && !isFullScreen()) move(at);
+    } else {
+      auto* w = new MainWindow;
+      w->setAttribute(Qt::WA_DeleteOnClose);
+      releaseTab(t);
+      w->adoptTab(t);
+      w->setWindowState(Qt::WindowNoState);
+      w->resize(isMaximized() || isFullScreen() ? normalGeometry().size() : size());
+      w->move(at);
+      w->show();
+      w->activateWindow();
+    }
+  }
+  if (tabs_->count() == 0) close();  // its last tab went to another window
 }
 
 bool MainWindow::closeTab(DocumentTab* t) {
@@ -386,6 +534,7 @@ bool MainWindow::closeTab(DocumentTab* t) {
 void MainWindow::onCurrentTabChanged() {
   DocumentTab* t = tab();
   central_->setCurrentIndex(t ? 1 : 0);
+  updateSidePanel(false);
   if (t) {
     thumbsStack_->setCurrentWidget(t->thumbnails());
     commentsStack_->setCurrentWidget(t->comments());
@@ -416,6 +565,17 @@ void MainWindow::updateTabTitle(DocumentTab* t) {
 // Actions, menus, toolbars
 
 void MainWindow::createActions() {
+  // The side panel's buttons (createToolBars puts them down the left edge).
+  static const char* const panelNames[4] = {QT_TR_NOOP("Page &Thumbnails"), QT_TR_NOOP("&Bookmarks"),
+                                            QT_TR_NOOP("Atta&chments"), QT_TR_NOOP("La&yers")};
+  for (int i = 0; i < 4; ++i) {
+    QAction* a = new QAction(panelIcon(i, palette()), tr(panelNames[i]), this);
+    a->setCheckable(true);
+    if (i == 0) a->setShortcut(QKeySequence(Qt::Key_F4));
+    connect(a, &QAction::triggered, this, [this, i](bool on) { showSidePanel(on ? i : -1); });
+    panelActs_[std::size_t(i)] = a;
+  }
+
   openAct_ = new QAction(themeIcon("document-open", QStyle::SP_DialogOpenButton), tr("&Open…"), this);
   openAct_->setShortcut(QKeySequence::Open);
   connect(openAct_, &QAction::triggered, this, [this] {
@@ -441,7 +601,7 @@ void MainWindow::createActions() {
 
   quitAct_ = new QAction(tr("E&xit"), this);
   quitAct_->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_Q));
-  connect(quitAct_, &QAction::triggered, this, &QWidget::close);
+  connect(quitAct_, &QAction::triggered, qApp, &QApplication::closeAllWindows);  // every window
 
   undoAct_ = new QAction(themeIcon("edit-undo"), tr("&Undo"), this);
   undoAct_->setShortcut(QKeySequence::Undo);
@@ -675,7 +835,9 @@ void MainWindow::createActions() {
   zoomOutAct_->setShortcut(QKeySequence::ZoomOut);
   connect(zoomOutAct_, &QAction::triggered, this, [this] { if (auto* t = tab()) t->view()->zoomOut(); });
   // Acrobat's shortcuts: Ctrl+0 fit page, Ctrl+1 actual size, Ctrl+2 fit width.
-  actualSizeAct_ = new QAction(themeIcon("zoom-original"), tr("&Actual Size"), this);
+  QIcon actualSize = themeIcon("zoom-original");
+  if (actualSize.isNull() || actualSize.availableSizes().isEmpty()) actualSize = actualSizeIcon(palette());
+  actualSizeAct_ = new QAction(actualSize, tr("&Actual Size"), this);
   actualSizeAct_->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_1));
   connect(actualSizeAct_, &QAction::triggered, this, [this] { if (auto* t = tab()) t->view()->setZoom(1.0); });
   fitPageAct_ = new QAction(themeIcon("zoom-fit-best"), tr("Fit &Page"), this);
@@ -808,10 +970,8 @@ void MainWindow::createMenus() {
   view->addAction(fitPageAct_);
   view->addAction(fitWidthAct_);
   view->addSeparator();
-  QAction* pagesPanel = thumbsDock_->toggleViewAction();
-  pagesPanel->setText(tr("Page &Thumbnails"));
-  pagesPanel->setShortcut(QKeySequence(Qt::Key_F4));
-  view->addAction(pagesPanel);
+  thumbsDock_->toggleViewAction()->setVisible(false);  // the panel buttons instead
+  for (QAction* a : panelActs_) view->addAction(a);
   QAction* commentsPanel = commentsDock_->toggleViewAction();
   commentsPanel->setText(tr("Co&mments"));
   commentsPanel->setShortcut(QKeySequence(Qt::Key_F6));
@@ -824,7 +984,7 @@ void MainWindow::createMenus() {
   fullScreenAct_ = view->addAction(tr("&Full Screen"));
   fullScreenAct_->setCheckable(true);
   fullScreenAct_->setShortcut(QKeySequence(Qt::Key_F11));
-  fullScreenAct_->setShortcutContext(Qt::ApplicationShortcut);
+  fullScreenAct_->setShortcutContext(Qt::WindowShortcut);  // each window its own (several windows: one key each)
   connect(fullScreenAct_, &QAction::triggered, this, [this](bool on) {
     if (on == isFullScreen()) return;
     if (on) {
@@ -855,7 +1015,91 @@ void MainWindow::createMenus() {
   updateRecentMenu();
 }
 
+void MainWindow::showSidePanel(int which) {
+  static const char* const titles[4] = {QT_TR_NOOP("Page Thumbnails"), QT_TR_NOOP("Bookmarks"), QT_TR_NOOP("Attachments"),
+                                        QT_TR_NOOP("Layers")};
+  for (int i = 0; i < 4; ++i) panelActs_[std::size_t(i)]->setChecked(i == which);
+  if (which < 0) {
+    thumbsDock_->hide();
+    return;
+  }
+  sideStack_->setCurrentIndex(which);
+  thumbsDock_->setWindowTitle(tr(titles[which]));
+  thumbsDock_->show();
+  QSettings().setValue("window/sidePanel", which);
+  updateSidePanel(false);
+}
+
+void MainWindow::updateSidePanel(bool changed) {
+  if (thumbsDock_->isHidden()) return;
+  const int which = sideStack_->currentIndex();
+  if (which <= 0) return;
+  DocumentTab* t = tab();
+  const std::shared_ptr<pdfz::Document> doc = t ? t->document() : nullptr;
+  auto& shown = panelDoc_[std::size_t(which)];
+  if (!changed && shown == doc.get()) return;
+  shown = doc.get();
+  QApplication::setOverrideCursor(Qt::WaitCursor);  // (layers: every page is read)
+  if (which == 1) bookmarks_->setDocument(doc);
+  else if (which == 2) attachments_->setDocument(doc);
+  else layers_->setDocument(doc);
+  QApplication::restoreOverrideCursor();
+}
+
+void MainWindow::attachFiles() {
+  DocumentTab* t = tab();
+  if (!t || !t->hasDocument()) return;
+  const QStringList paths = QFileDialog::getOpenFileNames(this, tr("Attach Files"), lastDir());
+  if (paths.isEmpty()) return;
+  rememberDir(paths.front());
+  for (const QString& path : paths) {
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly)) {
+      QMessageBox::warning(this, tr("Attach Files"), tr("Couldn't read %1.").arg(QDir::toNativeSeparators(path)));
+      continue;
+    }
+    const QByteArray bytes = f.readAll();
+    const std::vector<std::uint8_t> content(bytes.begin(), bytes.end());
+    // A name that's taken gets a number: "notes (2).txt".
+    const QFileInfo fi(path);
+    std::set<std::string> taken;
+    for (const auto& a : t->document()->attachments()) taken.insert(a.name);
+    QString name = fi.fileName();
+    for (int n = 2; taken.count(name.toStdString()); ++n)
+      name = fi.completeBaseName() + QStringLiteral(" (%1)").arg(n) + (fi.suffix().isEmpty() ? QString() : "." + fi.suffix());
+    if (!t->applyEdit(tr("Attach File"), t->view()->currentPage(), DocumentTab::Scope::Annotations,
+                      [&](pdfz::Document& d) { return d.addAttachment(name.toStdString(), content); }))
+      QMessageBox::warning(this, tr("Attach Files"), tr("Couldn't attach %1.").arg(fi.fileName()));
+  }
+  updateSidePanel(true);
+}
+
+void MainWindow::removeAttachment(int index) {
+  DocumentTab* t = tab();
+  if (!t || !t->hasDocument() || index < 0) return;
+  if (t->applyEdit(tr("Delete Attachment"), t->view()->currentPage(), DocumentTab::Scope::Annotations,
+                   [&](pdfz::Document& d) { return d.removeAttachment(index); }))
+    statusBar()->showMessage(tr("Deleted the attachment (Ctrl+Z to undo)"), 3000);
+  updateSidePanel(true);
+}
+
 void MainWindow::createToolBars() {
+  // The side panel's buttons, down the left edge (Acrobat's): a click shows that panel, or
+  // hides it if it's showing.
+  panelBar_ = new QToolBar(tr("Panels"), this);
+  panelBar_->setObjectName("panelToolBar");
+  panelBar_->setMovable(false);
+  panelBar_->setIconSize(QSize(24, 24));
+  panelBar_->toggleViewAction()->setVisible(false);
+  addToolBar(Qt::LeftToolBarArea, panelBar_);
+  for (QAction* a : panelActs_) panelBar_->addAction(a);
+  // Closed from its own title bar: no button is down.
+  connect(thumbsDock_, &QDockWidget::visibilityChanged, this, [this] {
+    if (thumbsDock_->isHidden())
+      for (QAction* a : panelActs_) a->setChecked(false);
+  });
+
+
   QToolBar* tb = addToolBar(tr("Main"));
   tb->setObjectName("mainToolBar");
   tb->setMovable(false);
@@ -899,6 +1143,7 @@ void MainWindow::createToolBars() {
   tb->addWidget(zoomCombo_);
   tb->addAction(zoomInAct_);
   tb->addSeparator();
+  tb->addAction(actualSizeAct_);
   tb->addAction(fitWidthAct_);
   tb->addAction(fitPageAct_);
   tb->addSeparator();
@@ -1405,6 +1650,11 @@ void MainWindow::updateRecentMenu() {
 }
 
 void MainWindow::dragEnterEvent(QDragEnterEvent* e) {
+  if (e->mimeData()->hasFormat(kTabMime)) {  // a tab, from this window or another
+    e->setDropAction(Qt::MoveAction);
+    e->accept();
+    return;
+  }
   if (e->mimeData()->hasUrls()) {
     for (const QUrl& u : e->mimeData()->urls())
       if (u.isLocalFile() && u.toLocalFile().endsWith(".pdf", Qt::CaseInsensitive)) {
@@ -1414,7 +1664,38 @@ void MainWindow::dragEnterEvent(QDragEnterEvent* e) {
   }
 }
 
+void MainWindow::dragMoveEvent(QDragMoveEvent* e) {
+  if (e->mimeData()->hasFormat(kTabMime)) {
+    e->setDropAction(Qt::MoveAction);
+    e->accept();
+    return;
+  }
+  QMainWindow::dragMoveEvent(e);
+}
+
 void MainWindow::dropEvent(QDropEvent* e) {
+  if (e->mimeData()->hasFormat(kTabMime)) {
+    // Which tab: one of this program's (found among the windows, never taken on trust).
+    const quintptr id = quintptr(e->mimeData()->data(kTabMime).toULongLong());
+    for (MainWindow* from : windows())
+      for (int i = 0; i < from->tabs_->count(); ++i) {
+        auto* t = qobject_cast<DocumentTab*>(from->tabs_->widget(i));
+        if (reinterpret_cast<quintptr>(t) != id) continue;
+        e->setDropAction(Qt::MoveAction);
+        e->accept();
+        if (from == this) return;  // where it was
+        // Dropped on the tabs: in among them, there.
+        const QPoint onBar = tabs_->bar()->mapFrom(this, e->position().toPoint());
+        const int at = tabs_->bar()->rect().contains(onBar) ? tabs_->bar()->tabAt(onBar) : -1;
+        from->releaseTab(t);
+        adoptTab(t, at);
+        activateWindow();
+        raise();
+        return;
+      }
+    e->ignore();
+    return;
+  }
   bool any = false;
   for (const QUrl& u : e->mimeData()->urls())
     if (u.isLocalFile() && u.toLocalFile().endsWith(".pdf", Qt::CaseInsensitive)) {

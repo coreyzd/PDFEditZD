@@ -17,8 +17,12 @@
 #include <vector>
 
 namespace pdfz { class Document; }
+class AttachmentsPanel;
+class BookmarksPanel;
 class DocumentTab;
+class DocumentTabWidget;
 class FindBar;
+class LayersPanel;
 class QAction;
 class QActionGroup;
 class QComboBox;
@@ -41,10 +45,23 @@ public:
   // Opens a PDF in a new tab (or shows its tab if it's already open).
   bool openFile(const QString& path);
 
+  // Several windows, each with its tabs (a tab dragged out of a window gets a window of its
+  // own). Files from outside (the command line, or the program started again with files: one
+  // copy runs, and the others hand it their files) go to the window used last, each in a tab,
+  // or to the tab that has it already, in whatever window; that window comes to the front.
+  static QList<MainWindow*> windows();
+  static void openFromOutside(const QStringList& paths);
+  // A tab moved from this window to another: taken out of this one (its panels and
+  // connections too), and put in that one (at `index`, or last).
+  void releaseTab(DocumentTab* t);
+  void adoptTab(DocumentTab* t, int index = -1);
+  int tabCount() const;
+
 protected:
   void closeEvent(QCloseEvent* e) override;
   void changeEvent(QEvent* e) override;
   void dragEnterEvent(QDragEnterEvent* e) override;
+  void dragMoveEvent(QDragMoveEvent* e) override;
   void dropEvent(QDropEvent* e) override;
 
 private:
@@ -55,6 +72,15 @@ private:
   void connectTab(DocumentTab* t);
   bool closeTab(DocumentTab* t);  // asks to save first; false if the user canceled
   void onCurrentTabChanged();
+  void dragTabOff(int index);  // a tab dragged off the bar: into another window, or a new one
+  // The side panel: shows panel `which` (0 thumbnails, 1 bookmarks, 2 attachments, 3 layers),
+  // or hides it (-1).
+  void showSidePanel(int which);
+  // The bookmarks, attachments or layers showing read again from the current tab's document:
+  // if it's another one, or always (`changed`: its pages or attachments changed).
+  void updateSidePanel(bool changed);
+  void attachFiles();
+  void removeAttachment(int index);
   void updateTabTitle(DocumentTab* t);
 
   void createActions();
@@ -136,10 +162,17 @@ private:
   QStackedWidget* central_;
   QWidget* welcome_;
   QListWidget* welcomeRecent_;
-  QTabWidget* tabs_;
+  DocumentTabWidget* tabs_;
   FindBar* findBar_;
-  QDockWidget* thumbsDock_;
-  QStackedWidget* thumbsStack_;
+  QDockWidget* thumbsDock_;     // the side panel: page thumbnails, bookmarks, attachments, layers
+  QStackedWidget* sideStack_;   // one of these:
+  QStackedWidget* thumbsStack_;  // each tab's thumbnails
+  BookmarksPanel* bookmarks_;
+  AttachmentsPanel* attachments_;
+  LayersPanel* layers_;
+  QToolBar* panelBar_;          // down the left edge: a button for each (as in Acrobat)
+  std::array<QAction*, 4> panelActs_{};
+  std::array<const void*, 4> panelDoc_{};  // the document each panel last showed
   QDockWidget* commentsDock_;
   QStackedWidget* commentsStack_;
 

@@ -55,6 +55,10 @@ public:
 
   int currentPage() const { return currentPage_; }
   void goToPage(int page);
+  // Shows `top` (display points from the page's top) of `page` at the top of the view.
+  void goToPoint(int page, double top);
+  // Whether any of the page is in view.
+  bool isPageVisible(int page) const;
 
   // 1.0 is actual size: a 1-inch line is an inch long at the screen's logical DPI.
   double zoom() const { return zoom_; }
