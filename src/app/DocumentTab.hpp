@@ -66,6 +66,8 @@ public:
   void deleteAnnotation(int page, int index);
   void moveAnnotation(int page, int index, double dx, double dy);
   void resizeAnnotation(int page, int index, const pdfz::RectF& rect);
+  // A line's ends, or a callout's leader or box, as `a` has them now.
+  void reshapeAnnotation(int page, int index, pdfz::Annotation a);
   // Restyles a comment.
   void restyleAnnotation(int page, int index, const StyleChange& change);
   // Typing in a text box on the page: ends it (adding or changing the box, one undo step).
@@ -97,6 +99,8 @@ public:
   // Edit PDF: a picture added to the page's content, filling `rect` (display frame); it's then
   // selected.
   void addContentImage(int page, const pdfz::Document::PageImage& image, const pdfz::RectF& rect);
+  // A drawing (a one-page PDF: an SVG drawn into one) added the same way.
+  void addContentDrawing(int page, const QByteArray& pdf, const pdfz::RectF& rect);
   // The selected content to the clipboard (as a PDF of its own, which pastes in the same place
   // in any document, and as a picture and text for other programs); cutting deletes it too.
   void copyContent(bool cut);

@@ -85,6 +85,10 @@ struct Page {
 
 const char* const kStyleKey = "PDFZStyle";
 const char* const kBoxKey = "PDFZBox";  // a stamp's drawing box: "left bottom right top", user space
+// A callout's leader and box (user space): "tipX tipY kneeX kneeY endX endY left bottom right
+// top". PDFium can't write the standard /CL and /RD arrays; they're made from this when the
+// file is saved (see compact.cpp).
+const char* const kCalloutKey = "PDFZCallout";
 
 struct Annot {
   FPDF_ANNOTATION a = nullptr;
@@ -352,6 +356,13 @@ void setInk(FPDF_ANNOTATION a, const std::vector<std::vector<PointF>>& strokes, 
 
 // The rect an annotation needs: the given one, or one around its quads / strokes.
 RectF boundsFor(const Annotation& a) {
+  if (a.isCallout()) {  // the box and the leader, with room for the arrowhead
+    RectF r = a.rect.normalized();
+    for (const PointF& p : a.callout)
+      r = {std::min(r.left, p.x), std::min(r.top, p.y), std::max(r.right, p.x), std::max(r.bottom, p.y)};
+    const double w = std::max(1.0, a.borderWidth), pad = 6 + 6 * w + w;
+    return {r.left - pad, r.top - pad, r.right + pad, r.bottom + pad};
+  }
   if (isTextMarkup(a.kind) && !a.quads.empty()) {
     RectF r;
     for (const RectF& q : a.quads) r = r.united(q);
@@ -478,6 +489,27 @@ void writeAnnotation(FPDF_ANNOTATION h, const Annotation& a, const PageFrame& f,
   if (!a.subject.empty() || !isNew) setString(h, "Subj", a.subject);
   setString(h, "M", a.modified.empty() ? pdfDateNow() : a.modified);
   setString(h, kStyleKey, formatStyle(a));
+  if (a.isCallout()) {
+    std::string v;
+    char buf[32];
+    auto add = [&](double x) {
+      std::snprintf(buf, sizeof buf, v.empty() ? "%.3f" : " %.3f", x);
+      v += buf;
+    };
+    for (const PointF& p : a.callout) {
+      const PointF u = f.toUser(p);
+      add(u.x);
+      add(u.y);
+    }
+    const RectF box = f.toUser(a.rect.normalized());
+    add(box.left);
+    add(box.bottom);
+    add(box.right);
+    add(box.top);
+    setString(h, kCalloutKey, v);
+  } else if (FPDFAnnot_HasKey(h, kCalloutKey)) {
+    setString(h, kCalloutKey, "");  // a callout no longer (an empty one is none)
+  }
   // After /CA: PDFium gives the appearance the transparency state it names (/GS) when < 1.
   if (a.kind == AnnotKind::FreeText || !a.appearance.empty()) setAppearance(h, a.appearance);
 }
@@ -590,6 +622,16 @@ std::vector<Annotation> Document::annotations(int pageIndex) const {
       }
     }
     parseStyle(getString(h.a, kStyleKey), a);  // pdfz's own record, when there is one
+    if (a.kind == AnnotKind::FreeText) {  // a callout pdfz made: its leader, and its box
+      std::istringstream in(getString(h.a, kCalloutKey));
+      double v[10];
+      int got = 0;
+      while (got < 10 && in >> v[got]) ++got;
+      if (got == 10 && v[8] > v[6] && v[9] > v[7]) {
+        for (int k = 0; k < 3; ++k) a.callout.push_back(f.toDisplay(PointF{v[2 * k], v[2 * k + 1]}));
+        a.rect = f.toDisplay(RectF{v[6], v[9], v[8], v[7]});
+      }
+    }
 
     if (FPDFAnnot_HasAttachmentPoints(h.a)) {
       const std::size_t nq = FPDFAnnot_CountAttachmentPoints(h.a);
@@ -749,6 +791,18 @@ bool Document::moveAnnotation(int pageIndex, int index, double dx, double dy) {
     for (const auto& s : all) FPDFAnnot_AddInkStroke(h.a, s.data(), s.size());
   }
   FPDFAnnot_SetRect(h.a, &r);
+  if (const std::string c = getString(h.a, kCalloutKey); !c.empty()) {  // the leader and box go along
+    std::istringstream in(c);
+    std::string v;
+    double x;
+    char buf[32];
+    for (int k = 0; k < 10 && in >> x; ++k) {
+      const bool isX = k % 2 == 0;  // tip, knee, end: x y; the box: left bottom right top
+      std::snprintf(buf, sizeof buf, v.empty() ? "%.3f" : " %.3f", x + (isX ? ux : uy));
+      v += buf;
+    }
+    setString(h.a, kCalloutKey, v);
+  }
   setString(h.a, "M", pdfDateNow());
   needsAppearances_.insert(pageIndex);  // in case changing the ink list dropped the appearance
   markEdited();

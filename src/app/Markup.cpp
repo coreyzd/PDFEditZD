@@ -52,6 +52,11 @@ bool hit(const pdfz::Annotation& a, double x, double y, double tol) {
     return false;
   }
   const pdfz::RectF& r = a.rect;
+  if (a.isCallout()) {  // its leader too
+    const double edge = std::max(1.0, a.borderWidth) / 2 + tol;
+    if (distToSegment(x, y, a.callout[0], a.callout[1]) <= edge || distToSegment(x, y, a.callout[1], a.callout[2]) <= edge)
+      return true;
+  }
   const bool inRect = x >= r.left - tol && x <= r.right + tol && y >= r.top - tol && y <= r.bottom + tol;
   if (!inRect) return false;
   const double edge = a.borderWidth / 2 + tol;
@@ -103,6 +108,7 @@ QString toolName(MarkupTool t) {
     case MarkupTool::StrikeOut: return QObject::tr("Strikethrough");
     case MarkupTool::Note: return QObject::tr("Sticky Note");
     case MarkupTool::TextBox: return QObject::tr("Text Box");
+    case MarkupTool::Callout: return QObject::tr("Text Callout");
     case MarkupTool::Pen: return QObject::tr("Pen");
     case MarkupTool::Rectangle: return QObject::tr("Rectangle");
     case MarkupTool::Ellipse: return QObject::tr("Ellipse");
@@ -118,7 +124,7 @@ QString toolName(MarkupTool t) {
 }
 
 QString toolKey(MarkupTool t) {
-  static const char* const keys[] = {"highlight", "underline", "strikeout", "note", "textbox",
+  static const char* const keys[] = {"highlight", "underline", "strikeout", "note", "textbox", "callout",
                                      "pen", "rectangle", "ellipse", "line", "arrow",
                                      "filltext", "check", "cross", "dot", "date"};
   return QLatin1String(keys[int(t)]);
@@ -135,7 +141,8 @@ MarkupStyle defaultStyle(MarkupTool t) {
     case MarkupTool::Underline: s.color = QColor(0x00, 0x9E, 0x3A); s.width = 1; break;
     case MarkupTool::StrikeOut: s.width = 1; break;
     case MarkupTool::Note: s.color = QColor(0xFF, 0xD4, 0x00); s.width = 1; break;
-    case MarkupTool::TextBox: s.width = 1; break;  // red text in a thin red box, like Acrobat's
+    case MarkupTool::TextBox:  // red text in a thin red box, like Acrobat's
+    case MarkupTool::Callout: s.width = 1; break;
     case MarkupTool::Pen: s.color = QColor(0x1A, 0x5F, 0xD0); break;
     // Fill & Sign: black, and text as if typed on the form (no box).
     case MarkupTool::FillText:
@@ -259,12 +266,16 @@ QString styleChangeLabel(const StyleChange& c) {
   return QObject::tr("Change Alignment");
 }
 
-bool usesFill(MarkupTool t) { return t == MarkupTool::Rectangle || t == MarkupTool::Ellipse || t == MarkupTool::TextBox; }
+bool usesFill(MarkupTool t) {
+  return t == MarkupTool::Rectangle || t == MarkupTool::Ellipse || t == MarkupTool::TextBox || t == MarkupTool::Callout;
+}
 bool usesWidth(MarkupTool t) {
   return t == MarkupTool::Pen || t == MarkupTool::Rectangle || t == MarkupTool::Ellipse || t == MarkupTool::Line ||
-         t == MarkupTool::Arrow || t == MarkupTool::TextBox;
+         t == MarkupTool::Arrow || t == MarkupTool::TextBox || t == MarkupTool::Callout;
 }
-bool usesText(MarkupTool t) { return t == MarkupTool::TextBox || t == MarkupTool::FillText || t == MarkupTool::Date; }
+bool usesText(MarkupTool t) {
+  return t == MarkupTool::TextBox || t == MarkupTool::Callout || t == MarkupTool::FillText || t == MarkupTool::Date;
+}
 bool usesOpacity(MarkupTool t) { return !markSubject(t); }
 bool usesOpacity(const pdfz::Annotation& a) { return a.kind != pdfz::AnnotKind::Stamp; }
 
@@ -385,6 +396,94 @@ std::vector<std::vector<pdfz::PointF>> arrowStrokes(pdfz::PointF tail, pdfz::Poi
   const pdfz::PointF h1{tip.x - head * std::cos(ang - spread), tip.y - head * std::sin(ang - spread)};
   const pdfz::PointF h2{tip.x - head * std::cos(ang + spread), tip.y - head * std::sin(ang + spread)};
   return {{tail, tip}, {h1, tip, h2}};
+}
+
+bool isLineOrArrow(const pdfz::Annotation& a) {
+  return a.kind == pdfz::AnnotKind::Ink && (a.subject == "Line" || a.subject == "Arrow") && !a.ink.empty() &&
+         a.ink[0].size() == 2;
+}
+
+void setLineEnds(pdfz::Annotation& a, pdfz::PointF tail, pdfz::PointF tip) {
+  a.ink = isArrow(a) ? arrowStrokes(tail, tip, a.borderWidth) : std::vector<std::vector<pdfz::PointF>>{{tail, tip}};
+}
+
+pdfz::PointF snapTo45(pdfz::PointF from, pdfz::PointF to) {
+  const double dx = to.x - from.x, dy = to.y - from.y;
+  if (dx == 0 && dy == 0) return to;
+  const double step = 3.14159265358979 / 4;
+  const double ang = std::round(std::atan2(dy, dx) / step) * step;
+  // As far along that direction as the mouse is (straight across when it's a little off).
+  const double len = std::max(0.0, dx * std::cos(ang) + dy * std::sin(ang));
+  return {from.x + len * std::cos(ang), from.y + len * std::sin(ang)};
+}
+
+void fitCallout(pdfz::Annotation& a) {
+  if (!a.isCallout()) return;
+  const pdfz::RectF b = a.rect.normalized();
+  const pdfz::PointF k = a.callout[1];
+  const double cx = (b.left + b.right) / 2, cy = (b.top + b.bottom) / 2;
+  pdfz::PointF end;
+  if (k.x < b.left) end = {b.left, cy};
+  else if (k.x > b.right) end = {b.right, cy};
+  else if (k.y < b.top) end = {cx, b.top};
+  else if (k.y > b.bottom) end = {cx, b.bottom};
+  else end = k.x < cx ? pdfz::PointF{b.left, cy} : pdfz::PointF{b.right, cy};  // the knee in the box
+  // A straight stub out of the box (as a new callout has) stays straight: the knee follows.
+  const pdfz::PointF was = a.callout[2];
+  const bool side = end.x == b.left || end.x == b.right;
+  if (side && std::abs(k.y - was.y) < 0.01) a.callout[1].y = end.y;
+  else if (!side && std::abs(k.x - was.x) < 0.01) a.callout[1].x = end.x;
+  a.callout[2] = end;
+}
+
+void placeCallout(pdfz::Annotation& a, pdfz::PointF tip, pdfz::PointF end, double w, double h, double pageWidth,
+                  double pageHeight) {
+  const struct { double width, height; } page{pageWidth, pageHeight};
+  const double dx = end.x - tip.x, dy = end.y - tip.y;
+  w = std::min(w, page.width);
+  h = std::min(h, page.height);
+  pdfz::RectF box;
+  pdfz::PointF knee;
+  if (std::abs(dy) > 2 * std::abs(dx)) {  // mostly up or down: the box above or below, the leader into its edge
+    const double stub = std::min(18.0, std::abs(dy) / 3);
+    const double top = dy < 0 ? end.y - h : end.y;
+    box = {end.x - w / 2, top, end.x + w / 2, top + h};
+    knee = {end.x, dy < 0 ? end.y + stub : end.y - stub};
+  } else {  // to one side, the leader coming out of the box's side (as Acrobat's do)
+    const double stub = std::min(18.0, std::abs(dx) / 3);
+    const double left = dx >= 0 ? end.x : end.x - w;
+    box = {left, end.y - h / 2, left + w, end.y + h / 2};
+    knee = {dx >= 0 ? end.x - stub : end.x + stub, end.y};
+  }
+  // On the page (the knee along with it, so the leader keeps its shape).
+  const double sx = std::clamp(box.left, 0.0, page.width - w) - box.left;
+  const double sy = std::clamp(box.top, 0.0, page.height - h) - box.top;
+  box = {box.left + sx, box.top + sy, box.right + sx, box.bottom + sy};
+  knee = {knee.x + sx, knee.y + sy};
+  a.rect = box;
+  a.callout = {tip, knee, end};
+  fitCallout(a);
+}
+
+std::pair<pdfz::PointF, pdfz::PointF> calloutHead(const pdfz::Annotation& a) {
+  if (!a.isCallout()) return {};
+  const pdfz::PointF tip = a.callout[0], from = a.callout[1];
+  const double len = std::hypot(tip.x - from.x, tip.y - from.y);
+  const double w = std::max(1.0, a.borderWidth);
+  const double head = std::min(5 + 4 * w, std::max(len * 0.9, 3.0));
+  const double ang = len > 0 ? std::atan2(tip.y - from.y, tip.x - from.x) : 0;
+  const double spread = 28 * 3.14159265358979 / 180;
+  return {{tip.x - head * std::cos(ang - spread), tip.y - head * std::sin(ang - spread)},
+          {tip.x - head * std::cos(ang + spread), tip.y - head * std::sin(ang + spread)}};
+}
+
+pdfz::RectF calloutBounds(const pdfz::Annotation& a) {
+  pdfz::RectF r = a.rect.normalized();
+  if (!a.isCallout()) return r;
+  const auto [h1, h2] = calloutHead(a);
+  for (const pdfz::PointF& p : {a.callout[0], a.callout[1], a.callout[2], h1, h2})
+    r = {std::min(r.left, p.x), std::min(r.top, p.y), std::max(r.right, p.x), std::max(r.bottom, p.y)};
+  return r;
 }
 
 QFont fontFor(const std::string& name, double pixelSize) {
@@ -518,6 +617,16 @@ std::string freeTextAppearance(const pdfz::Annotation& a, const pdfz::PageFrame&
   }
   if (!path.isEmpty()) out += "f\n";  // glyph outlines fill with the nonzero rule
   out += "Q\n";
+  if (a.isCallout()) {  // the leader, from the box to its open arrowhead, in the border's color
+    auto pt = [&](pdfz::PointF d) {
+      const pdfz::PointF u = f.toUser(d);
+      return num(u.x) + " " + num(u.y);
+    };
+    const auto [h1, h2] = calloutHead(a);
+    out += "q\n1 J 1 j\n" + num(std::max(1.0, a.borderWidth)) + " w\n" + colorOp(a.color, "RG");
+    out += pt(a.callout[2]) + " m\n" + pt(a.callout[1]) + " l\n" + pt(a.callout[0]) + " l\nS\n";
+    out += pt(h1) + " m\n" + pt(a.callout[0]) + " l\n" + pt(h2) + " l\nS\nQ\n";
+  }
   return out;
 }
 

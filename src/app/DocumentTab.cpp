@@ -45,6 +45,7 @@ DocumentTab::DocumentTab(QWidget* parent) : QWidget(parent) {
   connect(view_, &DocumentView::stampCreated, this, &DocumentTab::addStamp);
   connect(view_, &DocumentView::annotationMoved, this, &DocumentTab::moveAnnotation);
   connect(view_, &DocumentView::annotationResized, this, &DocumentTab::resizeAnnotation);
+  connect(view_, &DocumentView::annotationReshaped, this, &DocumentTab::reshapeAnnotation);
   connect(view_, &DocumentView::annotationEditRequested, this, &DocumentTab::editAnnotation);
   connect(view_, &DocumentView::annotationDeleteRequested, this, &DocumentTab::deleteAnnotation);
   connect(view_, &DocumentView::annotationSelectionChanged, this, [this](int page, int index) {
@@ -240,6 +241,7 @@ QString DocumentTab::kindLabel(const pdfz::Annotation& a) const {
   }
   if (a.kind == pdfz::AnnotKind::FreeText && a.subject == "Date") return tr("Date");
   if (a.kind == pdfz::AnnotKind::FreeText && a.subject == "Fill Text") return tr("Text");
+  if (a.isCallout()) return tr("Callout");
   if (a.subject == "Arrow") return tr("Arrow");
   if (a.subject == "Line") return tr("Line");
   if (a.kind == pdfz::AnnotKind::Note) return tr("Sticky Note");
@@ -430,9 +432,24 @@ void DocumentTab::resizeAnnotation(int page, int index, const pdfz::RectF& rect)
   if (!found || !canResize(*found)) return;
   pdfz::Annotation a = *found;
   a.rect = rect;
+  fitCallout(a);
   if (a.kind == pdfz::AnnotKind::FreeText) a.appearance = freeTextAppearance(a, doc_->pageFrame(page));
   int now = -1;
   applyEdit(tr("Resize %1").arg(kindLabel(a)), page, Scope::Annotations, [&](pdfz::Document& d) {
+    now = d.updateAnnotation(page, index, a);
+    return now >= 0;
+  });
+  if (now >= 0) view_->selectAnnotation(page, now, false);
+}
+
+void DocumentTab::reshapeAnnotation(int page, int index, pdfz::Annotation a) {
+  const pdfz::Annotation* found = annotation(page, index);
+  if (!found || found->kind != a.kind) return;
+  a.modified.clear();  // now
+  fitCallout(a);
+  if (a.kind == pdfz::AnnotKind::FreeText) a.appearance = freeTextAppearance(a, doc_->pageFrame(page));
+  int now = -1;
+  applyEdit(tr("Adjust %1").arg(kindLabel(a)), page, Scope::Annotations, [&](pdfz::Document& d) {
     now = d.updateAnnotation(page, index, a);
     return now >= 0;
   });
@@ -501,6 +518,16 @@ void DocumentTab::addContentImage(int page, const pdfz::Document::PageImage& ima
     view_->selectContentAt(page, centerOf(rect));
   else
     QMessageBox::warning(this, tr("Add Image"), tr("Couldn't add the picture to the page."));
+}
+
+void DocumentTab::addContentDrawing(int page, const QByteArray& pdf, const pdfz::RectF& rect) {
+  if (!doc_) return;
+  const std::vector<std::uint8_t> bytes(pdf.begin(), pdf.end());
+  if (applyEdit(tr("Add Image"), page, Scope::Content,
+                [&](pdfz::Document& d) { return d.addContentDrawing(page, bytes, rect); }))
+    view_->selectContentAt(page, centerOf(rect));
+  else
+    QMessageBox::warning(this, tr("Add Image"), tr("Couldn't add the drawing to the page."));
 }
 
 TextEditing DocumentTab::editingFor(int page, const pdfz::ContentBlock& block) {
@@ -682,6 +709,11 @@ QJsonObject toJson(const pdfz::Annotation& a, const pdfz::StampDrawing* drawing)
     ink.append(s);
   }
   o["ink"] = ink;
+  if (a.isCallout()) {
+    QJsonArray c;
+    for (const pdfz::PointF& p : a.callout) c.append(QJsonArray{p.x, p.y});
+    o["callout"] = c;
+  }
   o["fontSize"] = a.fontSize;
   o["fontName"] = QString::fromStdString(a.fontName);
   o["textColor"] = toJson(a.textColor);
@@ -742,6 +774,9 @@ bool fromJson(const QJsonObject& o, pdfz::Annotation& a, pdfz::StampDrawing& dra
     for (const QJsonValue& p : s.toArray()) stroke.push_back({p.toArray().at(0).toDouble(), p.toArray().at(1).toDouble()});
     if (!stroke.empty()) a.ink.push_back(std::move(stroke));
   }
+  for (const QJsonValue& p : o["callout"].toArray())
+    a.callout.push_back({p.toArray().at(0).toDouble(), p.toArray().at(1).toDouble()});
+  if (a.kind != pdfz::AnnotKind::FreeText || a.callout.size() != 3) a.callout.clear();
   a.fontSize = o["fontSize"].toDouble(12);
   a.fontName = o["fontName"].toString("Helv").toStdString();
   a.textColor = colorFrom(o["textColor"]);
@@ -886,6 +921,7 @@ bool DocumentTab::pasteAnnotations(int page) {
     a.rect = {a.rect.left + dx, a.rect.top + dy, a.rect.right + dx, a.rect.bottom + dy};
     for (auto& stroke : a.ink)
       for (pdfz::PointF& p : stroke) p = {p.x + dx, p.y + dy};
+    for (pdfz::PointF& p : a.callout) p = {p.x + dx, p.y + dy};
   }
   if (a.kind == pdfz::AnnotKind::FreeText) a.appearance = freeTextAppearance(a, doc_->pageFrame(page));
 

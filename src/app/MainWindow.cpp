@@ -12,6 +12,7 @@
 #include "TextSearch.hpp"
 #include "ThumbnailPanel.hpp"
 #include "ToolIcons.hpp"
+#include "VectorArt.hpp"
 
 #include "core/annotations.hpp"
 #include "core/document.hpp"
@@ -692,7 +693,9 @@ void MainWindow::createActions() {
   const QString tips[kMarkupToolCount] = {
       tr("Highlight: drag over text"),          tr("Underline: drag over text"),
       tr("Strikethrough: drag over text"),      tr("Sticky note: click where it goes"),
-      tr("Text box: click, or drag out a box"), tr("Pen: draw freehand"),
+      tr("Text box: click, or drag out a box"),
+      tr("Text callout: press on what it points to, drag to where the text goes, and type"),
+      tr("Pen: draw freehand"),
       tr("Rectangle: drag out a rectangle"),    tr("Ellipse: drag out an ellipse"),
       tr("Line: drag from end to end"),         tr("Arrow: drag from the tail to the tip"),
       tr("Add text: click where it goes, and type"), tr("Checkmark: click where it goes"),
@@ -794,6 +797,10 @@ void MainWindow::createActions() {
     // Another tool: the typing in a text box is over (the Select tool is where typing goes on).
     if (picked != selectToolAct_)
       if (DocumentTab* t = tab()) t->finishTextEditing();
+    // Highlight, Underline or Strikethrough picked with text selected: the selection gets it
+    // (and the tool stays on, for more).
+    for (MarkupTool m : {MarkupTool::Highlight, MarkupTool::Underline, MarkupTool::StrikeOut})
+      if (picked == markupActs_[std::size_t(m)]) markupSelection(m);
     applyTool();
     updateStyleControls();
   });
@@ -835,9 +842,9 @@ void MainWindow::createActions() {
   zoomOutAct_->setShortcut(QKeySequence::ZoomOut);
   connect(zoomOutAct_, &QAction::triggered, this, [this] { if (auto* t = tab()) t->view()->zoomOut(); });
   // Acrobat's shortcuts: Ctrl+0 fit page, Ctrl+1 actual size, Ctrl+2 fit width.
-  QIcon actualSize = themeIcon("zoom-original");
-  if (actualSize.isNull() || actualSize.availableSizes().isEmpty()) actualSize = actualSizeIcon(palette());
-  actualSizeAct_ = new QAction(actualSize, tr("&Actual Size"), this);
+  // Always the drawn "1:1" frame: Windows' icon theme gives zoom-original the magnifier Find
+  // has too.
+  actualSizeAct_ = new QAction(actualSizeIcon(palette()), tr("&Actual Size"), this);
   actualSizeAct_->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_1));
   connect(actualSizeAct_, &QAction::triggered, this, [this] { if (auto* t = tab()) t->view()->setZoom(1.0); });
   fitPageAct_ = new QAction(themeIcon("zoom-fit-best"), tr("Fit &Page"), this);
@@ -2007,7 +2014,9 @@ void MainWindow::changeStyle(const StyleChange& requested) {
   }
   if (v->isEditingText()) {
     if (v->isEditingNewText()) {  // what the tool that made it makes next looks like this too
-      const MarkupTool tool = fillText ? MarkupTool::FillText : MarkupTool::TextBox;
+      const MarkupTool tool = fillText                        ? MarkupTool::FillText
+                              : v->editedText()->isCallout() ? MarkupTool::Callout
+                                                             : MarkupTool::TextBox;
       MarkupStyle& s = styles_[std::size_t(tool)];
       applyStyleChange(s, change);
       saveStyle(tool, s);
@@ -2197,26 +2206,45 @@ void MainWindow::addImage() {
   t->finishTextEditing();
   QSettings st;
   const QString dir = st.value("edit/imageDir", QStandardPaths::writableLocation(QStandardPaths::PicturesLocation)).toString();
-  const QString path = QFileDialog::getOpenFileName(this, tr("Add Image"), dir,
-                                                    tr("Pictures (%1)").arg(imagePatterns().join(' ')));
+  const QStringList svg{"*.svg", "*.svgz"};
+  const QString path = QFileDialog::getOpenFileName(
+      this, tr("Add Image"), dir,
+      tr("Pictures and drawings (%1);;Pictures (%2);;SVG drawings (%3)")
+          .arg((imagePatterns() + svg).join(' '), imagePatterns().join(' '), svg.join(' ')));
   if (path.isEmpty()) return;
   st.setValue("edit/imageDir", QFileInfo(path).absolutePath());
+  // An SVG goes in as vector content (sharp at any size); a picture as one.
+  const bool isSvgFile = svg.contains("*." + QFileInfo(path).suffix().toLower());
   pdfz::Document::PageImage img;
+  QByteArray drawing;
+  QSizeF size;
   QString error;
-  if (!loadPageImage(path, img, &error)) {
-    QMessageBox::warning(this, tr("Add Image"), error.isEmpty() ? tr("Couldn't read that picture.") : error);
-    return;
+  if (isSvgFile) {
+    drawing = svgAsPdf(path, &size, &error);
+    if (drawing.isEmpty()) {
+      QMessageBox::warning(this, tr("Add Image"), error.isEmpty() ? tr("Couldn't read that drawing.") : error);
+      return;
+    }
+  } else {
+    if (!loadPageImage(path, img, &error)) {
+      QMessageBox::warning(this, tr("Add Image"), error.isEmpty() ? tr("Couldn't read that picture.") : error);
+      return;
+    }
+    size = QSizeF(img.width, img.height);
   }
   int page;
   pdfz::PointF c;
   if (!t->view()->visibleCenter(page, c)) return;
   const pdfz::SizeF ps = t->document()->pageSize(page);
   const double maxSide = std::min({216.0, ps.width * 0.9, ps.height * 0.9});
-  const double k = maxSide / std::max(img.width, img.height);
-  const double w = img.width * k, h = img.height * k;
+  // A picture three inches across at most; a drawing its own size, unless that's bigger.
+  double k = maxSide / std::max(size.width(), size.height());
+  if (isSvgFile) k = std::min(k, 1.0);
+  const double w = size.width() * k, h = size.height() * k;
   const double x = std::clamp(c.x - w / 2, 0.0, std::max(0.0, ps.width - w));
   const double y = std::clamp(c.y - h / 2, 0.0, std::max(0.0, ps.height - h));
-  t->addContentImage(page, img, pdfz::RectF{x, y, x + w, y + h});
+  if (isSvgFile) t->addContentDrawing(page, drawing, pdfz::RectF{x, y, x + w, y + h});
+  else t->addContentImage(page, img, pdfz::RectF{x, y, x + w, y + h});
 }
 
 QMenu* MainWindow::colorMenu(QWidget* parent, const QString& noneText, std::function<void(const QColor&)> pick) {

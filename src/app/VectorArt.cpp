@@ -428,6 +428,38 @@ bool isSvg(const QString& path) {
 
 }  // namespace
 
+QByteArray svgAsPdf(const QString& path, QSizeF* sizePt, QString* error) {
+  if (error) error->clear();
+  QSvgRenderer svg(path);
+  if (!svg.isValid()) {
+    if (error) *error = QObject::tr("%1 couldn't be read as an SVG drawing.").arg(QFileInfo(path).fileName());
+    return {};
+  }
+  QSizeF size = svg.defaultSize();
+  if (size.isEmpty()) size = svg.viewBoxF().size();
+  if (size.isEmpty()) size = QSizeF(500, 500);
+  size *= 0.75;  // CSS pixels to points
+  QByteArray out;
+  QBuffer buf(&out);
+  buf.open(QIODevice::WriteOnly);
+  {
+    QPdfWriter writer(&buf);
+    writer.setCreator(QStringLiteral("PDFEditZD"));
+    writer.setResolution(720);  // 10 units a point
+    QPageLayout layout(QPageSize(size, QPageSize::Point, QString(), QPageSize::ExactMatch), QPageLayout::Portrait,
+                       QMarginsF(0, 0, 0, 0));
+    layout.setMode(QPageLayout::FullPageMode);
+    if (!writer.setPageLayout(layout)) return {};
+    QPainter p;
+    if (!p.begin(&writer)) return {};
+    p.scale(10, 10);
+    svg.render(&p, QRectF(QPointF(0, 0), size));
+    if (!p.end()) return {};
+  }
+  if (sizePt) *sizePt = size;
+  return out;
+}
+
 QStringList vectorPatterns() { return {"*.svg", "*.svgz", "*.pdf", "*.ai"}; }
 
 bool isVectorFile(const QString& path) {

@@ -56,6 +56,10 @@ struct Annotation {
   bool hidden = false;      // the Hidden flag (set while a text box is edited in place)
   std::vector<RectF> quads;               // text markups: the marked text, one rect per line
   std::vector<std::vector<PointF>> ink;   // ink: the strokes
+  // A text box with a leader (a callout: /IT /FreeTextCallout): the leader's three points,
+  // from what it points at (the arrowhead) to the knee, then to where it meets the box. Empty
+  // for a plain text box. `rect` is the box itself either way.
+  std::vector<PointF> callout;
   // Text boxes.
   double fontSize = 12;
   std::string fontName = "Helv";  // the PDF standard font: Helv, TiRo (Times) or Cour (Courier)
@@ -76,6 +80,7 @@ struct Annotation {
   bool editable() const;
   // A stamp pdfz made (a signature, initials, a check mark...): it can be moved and resized.
   bool isPdfzStamp() const { return kind == AnnotKind::Stamp && !subject.empty(); }
+  bool isCallout() const { return kind == AnnotKind::FreeText && callout.size() == 3; }
 };
 
 // What a stamp shows (Document::addStamp): filled outlines and an image, drawn in a box of the

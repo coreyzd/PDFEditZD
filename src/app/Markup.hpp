@@ -14,6 +14,7 @@
 
 #include <memory>
 #include <optional>
+#include <utility>
 #include <vector>
 
 namespace pdfz { class Document; }
@@ -45,11 +46,11 @@ bool canResize(const pdfz::Annotation& a);
 // The tools that make markups, and their remembered styles: the comment tools, then the Fill &
 // Sign ones (text without a box, check marks, crosses, dots and today's date).
 enum class MarkupTool {
-  Highlight, Underline, StrikeOut, Note, TextBox, Pen, Rectangle, Ellipse, Line, Arrow,
+  Highlight, Underline, StrikeOut, Note, TextBox, Callout, Pen, Rectangle, Ellipse, Line, Arrow,
   FillText, Check, Cross, Dot, Date
 };
-constexpr int kMarkupToolCount = 15;
-constexpr int kCommentToolCount = 10;  // the first ten
+constexpr int kMarkupToolCount = 16;
+constexpr int kCommentToolCount = 11;  // the first eleven
 inline bool isFillSignTool(MarkupTool t) { return int(t) >= kCommentToolCount; }
 
 struct MarkupStyle {
@@ -118,6 +119,25 @@ pdfz::StampDrawing::Path stampPath(const QPainterPath& path, const QColor& color
 // with the line width, so it stays an arrow when the line is thick (as Acrobat draws them).
 std::vector<std::vector<pdfz::PointF>> arrowStrokes(pdfz::PointF tail, pdfz::PointF tip, double width);
 bool isArrow(const pdfz::Annotation& a);
+// A line or an arrow pdfz drew (as ink): its two ends can be dragged. `tail` and `tip` (an
+// arrow's head is at the tip) are read and set, the arrowhead drawn again for the new ends.
+bool isLineOrArrow(const pdfz::Annotation& a);
+void setLineEnds(pdfz::Annotation& a, pdfz::PointF tail, pdfz::PointF tip);
+// `to`, moved so the line from `from` is at a multiple of 45 degrees (Shift, drawing lines).
+pdfz::PointF snapTo45(pdfz::PointF from, pdfz::PointF to);
+
+// Callouts (a text box with a leader line, see pdfz::Annotation::callout). The leader meets
+// the box in the middle of the side facing its knee: this puts it there, after the box or the
+// knee moved.
+void fitCallout(pdfz::Annotation& a);
+// A new callout pointing at `tip`, its box where the leader is let go (`end`): the box beside
+// that point, away from the tip, `width` by `height`, kept on the page.
+void placeCallout(pdfz::Annotation& a, pdfz::PointF tip, pdfz::PointF end, double width, double height,
+                  double pageWidth, double pageHeight);
+// The leader's arrowhead: two points beside the tip (an open arrow).
+std::pair<pdfz::PointF, pdfz::PointF> calloutHead(const pdfz::Annotation& a);
+// The box and the leader together.
+pdfz::RectF calloutBounds(const pdfz::Annotation& a);
 
 // The Qt font standing in for a PDF standard font name, at `pixelSize`.
 QFont fontFor(const std::string& pdfFontName, double pixelSize);

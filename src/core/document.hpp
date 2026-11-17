@@ -228,6 +228,10 @@ public:
   bool insertImagePage(int index, SizeF size, const PageImage& image, double margin = 18);
   // A picture added to a page's content, filling `rect` (display frame).
   bool addContentImage(int page, const PageImage& image, const RectF& rect);
+  // A drawing added to a page's content, filling `rect` (display frame): the first page of
+  // `pdf` (a whole PDF file: an SVG drawn into one, say), as vector content of its own (a
+  // form XObject), so it stays sharp and moves and resizes as one piece.
+  bool addContentDrawing(int page, const std::vector<std::uint8_t>& pdf, const RectF& rect);
   // Copies `pages` of `source` (in that order) so they start at `index` here. `source` may not
   // be this document.
   bool importPages(const Document& source, const std::vector<int>& pages, int index);

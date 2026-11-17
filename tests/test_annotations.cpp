@@ -601,3 +601,57 @@ TEST_CASE("AutoCAD's text comments are saved as they came, without an appearance
   CHECK(withAp == 1);
   CHECK(withoutAp == 1);
 }
+
+TEST_CASE("callouts: the leader and box come back, move together, and say so to other readers") {
+  for (int rotation : {0, 90}) {
+    CAPTURE(rotation);
+    auto doc = blank(300, 400, rotation, true);
+    Annotation c;
+    c.kind = AnnotKind::FreeText;
+    c.rect = {150, 40, 260, 70};
+    c.callout = {{40, 200}, {130, 55}, {150, 55}};
+    c.contents = "Callout";
+    c.color = {255, 0, 0};
+    c.borderWidth = 1;
+    c.appearance = "1 0 0 RG 0 0 m 1 1 l S";
+    REQUIRE(doc->addAnnotation(0, c) == 0);
+    auto check = [&](const Document& d, double dx, double dy) {
+      const Annotation a = d.annotations(0).at(0);
+      REQUIRE(a.isCallout());
+      CHECK(a.rect.left == doctest::Approx(150 + dx).epsilon(0.001));
+      CHECK(a.rect.top == doctest::Approx(40 + dy).epsilon(0.001));
+      CHECK(a.rect.right == doctest::Approx(260 + dx).epsilon(0.001));
+      CHECK(a.rect.bottom == doctest::Approx(70 + dy).epsilon(0.001));
+      CHECK(a.callout[0].x == doctest::Approx(40 + dx).epsilon(0.001));
+      CHECK(a.callout[0].y == doctest::Approx(200 + dy).epsilon(0.001));
+      CHECK(a.callout[1].x == doctest::Approx(130 + dx).epsilon(0.001));
+      CHECK(a.callout[2].x == doctest::Approx(150 + dx).epsilon(0.001));
+    };
+    check(*doc, 0, 0);
+    auto saved = reopen(*doc);
+    check(*saved, 0, 0);
+    // The standard entries, for Acrobat and the rest: written when the file is.
+    const auto bytes = doc->saveToMemory();
+    const std::string text(bytes.begin(), bytes.end());
+    CHECK(text.find("/IT/FreeTextCallout") != std::string::npos);
+    CHECK(text.find("/LE/OpenArrow") != std::string::npos);
+    CHECK(text.find("/CL[") != std::string::npos);
+    CHECK(text.find("/RD[") != std::string::npos);
+    // Saved again (the entries there already): one of each still.
+    const auto again = saved->saveToMemory();
+    const std::string text2(again.begin(), again.end());
+    CHECK(text2.find("/IT/FreeTextCallout") == text2.rfind("/IT/FreeTextCallout"));
+
+    REQUIRE(doc->moveAnnotation(0, 0, 10, 5));
+    check(*doc, 10, 5);
+    check(*reopen(*doc), 10, 5);
+
+    // No longer a callout: a plain text box.
+    Annotation plain = doc->annotations(0).at(0);
+    plain.callout.clear();
+    REQUIRE(doc->updateAnnotation(0, 0, plain) == 0);
+    CHECK_FALSE(doc->annotations(0).at(0).isCallout());
+    const auto plainBytes = doc->saveToMemory();
+    CHECK(std::string(plainBytes.begin(), plainBytes.end()).find("FreeTextCallout") == std::string::npos);
+  }
+}

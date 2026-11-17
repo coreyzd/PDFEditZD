@@ -734,6 +734,46 @@ bool Document::addContentImage(int pageIndex, const PageImage& image, const Rect
   return true;
 }
 
+bool Document::addContentDrawing(int pageIndex, const std::vector<std::uint8_t>& pdf, const RectF& rect) {
+  const RectF r = rect.normalized();
+  if (pageIndex < 0 || pageIndex >= pageCount() || pdf.empty() || r.width() <= 0 || r.height() <= 0) return false;
+  std::lock_guard lock(engineMutex());
+  FPDF_DOCUMENT src = FPDF_LoadMemDocument64(pdf.data(), pdf.size(), nullptr);
+  if (!src) return false;
+  FS_RECTF box{};  // the drawing's page: its size
+  FPDF_XOBJECT xobj = nullptr;
+  if (FPDF_PAGE p = FPDF_GetPageCount(src) > 0 ? FPDF_LoadPage(src, 0) : nullptr) {
+    const bool ok = FPDF_GetPageBoundingBox(p, &box);
+    FPDF_ClosePage(p);
+    if (ok && box.right > box.left && box.top > box.bottom)
+      xobj = FPDF_NewXObjectFromPage(asDoc(doc_), src, 0);  // copied in: `src` can go after this
+  }
+  FPDF_CloseDocument(src);
+  if (!xobj) return false;
+  FPDF_PAGEOBJECT form = FPDF_NewFormObjectFromXObject(xobj);
+  FPDF_CloseXObject(xobj);
+  if (!form) return false;
+  auto page = static_cast<FPDF_PAGE>(pageForContentEdit(pageIndex));
+  if (!page) {
+    FPDFPageObj_Destroy(form);
+    return false;
+  }
+  // The drawing's page (its box from 0, 0) onto the rect, upright on the screen whatever the
+  // page's /Rotate.
+  const PageFrame f = pageFrameOf(page);
+  const PointF bl = f.toUser(PointF{r.left, r.bottom}), br = f.toUser(PointF{r.right, r.bottom}),
+               tl = f.toUser(PointF{r.left, r.top});
+  const double w = box.right - box.left, h = box.top - box.bottom;
+  const double a = (br.x - bl.x) / w, b = (br.y - bl.y) / w, c = (tl.x - bl.x) / h, d = (tl.y - bl.y) / h;
+  // (The XObject's own /Matrix already starts its box at 0, 0.)
+  const FS_MATRIX m{float(a), float(b), float(c), float(d), float(bl.x), float(bl.y)};
+  FPDFPageObj_SetMatrix(form, &m);
+  FPDFPage_InsertObject(page, form);
+  if (!FPDFPage_GenerateContent(page)) return false;
+  markEdited();
+  return true;
+}
+
 bool Document::importPages(const Document& source, const std::vector<int>& pages, int index) {
   if (&source == this || pages.empty() || index < 0 || index > pageCount()) return false;
   for (int p : pages)

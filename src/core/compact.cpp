@@ -9,7 +9,8 @@
 // new cross-reference table. Anything unexpected and the file is kept as it is.
 //
 // On the way, annotations that came without an appearance are written without the one PDFium
-// made for them (see withoutGeneratedAppearance).
+// made for them (see withoutGeneratedAppearance), and pdfz's callouts get the entries PDFium
+// can't write (withCalloutEntries).
 #include "core/compact.hpp"
 
 #include <algorithm>
@@ -115,24 +116,17 @@ bool referencesFrom(const std::vector<std::uint8_t>& pdf, std::size_t pos, bool 
   return false;
 }
 
-// An annotation's dictionary without the appearance PDFium made for it ("/AP" and the
-// "/PDFIUM_HasGeneratedAP true" that marks it), for one that came without: AutoCAD's text
-// comments (an invisible /Square for each piece of SHX text, so it can be searched) have none,
-// and Acrobat, finding one, shows each with a comment icon. Not for pdfz's own annotations
-// (they have /PDFZStyle, or an /NM of "pdfz-..."), whose appearance PDFium may well have made.
-// `body`: the object's bytes from just after "obj". Empty if there's nothing to take out.
-std::string withoutGeneratedAppearance(std::string_view body) {
-  if (body.find("PDFIUM_HasGeneratedAP") == std::string_view::npos) return {};
+// A dictionary's entries, as written: `body` is an object's bytes from just after "obj".
+struct Entry {
+  std::string_view key;
+  std::size_t start, end;  // the key and its value, in `body`
+  std::string_view first;  // the value's first token
+};
+bool readEntries(std::string_view body, std::vector<Entry>& entries, std::size_t& close) {
   const auto* d = reinterpret_cast<const std::uint8_t*>(body.data());
   Lexer lx{d, body.size(), 0};
-  if (lx.next() != "<<") return {};
-  struct Entry {
-    std::string_view key;
-    std::size_t start, end;  // the key and its value, in `body`
-    std::string_view first;  // the value's first token
-  };
-  std::vector<Entry> entries;
-  std::size_t close = 0;
+  if (lx.next() != "<<") return false;
+  close = 0;
   for (int guard = 0; guard < 10'000; ++guard) {
     lx.skip();
     const std::size_t start = lx.pos;
@@ -141,14 +135,14 @@ std::string withoutGeneratedAppearance(std::string_view body) {
       close = lx.pos;
       break;
     }
-    if (key.empty() || key[0] != '/') return {};
+    if (key.empty() || key[0] != '/') return false;
     const std::string_view first = lx.next();
-    if (first.empty() || first == ">>") return {};
+    if (first.empty() || first == ">>") return false;
     if (first == "<<" || first == "[") {  // to its matching end
       int depth = 1;
       while (depth > 0) {
         const std::string_view t = lx.next();
-        if (t.empty()) return {};
+        if (t.empty()) return false;
         if (t == "<<" || t == "[") ++depth;
         if (t == ">>" || t == "]") --depth;
       }
@@ -159,7 +153,33 @@ std::string withoutGeneratedAppearance(std::string_view body) {
     }
     entries.push_back({key, start, lx.pos, first});
   }
-  if (!close) return {};
+  return close != 0;
+}
+
+// The dictionary again, without the entries `drop` says to leave out, with `extra` added.
+template <typename Drop>
+std::string rewritten(std::string_view body, const std::vector<Entry>& entries, std::size_t close, Drop drop,
+                      const std::string& extra) {
+  std::string out = "<<";
+  for (const Entry& e : entries)
+    if (!drop(e.key)) out.append(body.data() + e.start, e.end - e.start);
+  out += extra;
+  out += ">>";
+  out.append(body.data() + close, body.size() - close);
+  return out;
+}
+
+// An annotation's dictionary without the appearance PDFium made for it ("/AP" and the
+// "/PDFIUM_HasGeneratedAP" that says so), if it came without one. AutoCAD's SHX text
+// comments (an invisible /Square for each piece of SHX text, so it can be searched) have none,
+// and Acrobat, finding one, shows each with a comment icon. Not for pdfz's own annotations
+// (they have /PDFZStyle, or an /NM of "pdfz-..."), whose appearance PDFium may well have made.
+// Empty if there's nothing to take out.
+std::string withoutGeneratedAppearance(std::string_view body) {
+  if (body.find("PDFIUM_HasGeneratedAP") == std::string_view::npos) return {};
+  std::vector<Entry> entries;
+  std::size_t close = 0;
+  if (!readEntries(body, entries, close)) return {};
   bool generated = false, ours = false;
   for (const Entry& e : entries) {
     if (e.key == "/PDFIUM_HasGeneratedAP" && e.first == "true") generated = true;
@@ -168,12 +188,97 @@ std::string withoutGeneratedAppearance(std::string_view body) {
     if (e.key == "/Subtype" && e.first == "/Widget") ours = true;  // form fields: never touched here
   }
   if (!generated || ours) return {};
+  return rewritten(body, entries, close, [](std::string_view k) { return k == "/AP" || k == "/PDFIUM_HasGeneratedAP"; }, {});
+}
+
+// A literal string's bytes (PDFium writes plain ASCII ones as "(...)").
+std::string literal(std::string_view tok) {
+  std::string out;
+  if (tok.size() < 2 || tok.front() != '(') return out;
+  for (std::size_t i = 1; i + 1 < tok.size(); ++i) {
+    if (tok[i] == '\\' && i + 2 < tok.size()) ++i;
+    out += tok[i];
+  }
+  return out;
+}
+
+// A callout pdfz made (a text box with /PDFZCallout, its leader and box: see annotations.cpp)
+// with the entries that say so to other readers, which PDFium can't write: /IT
+// /FreeTextCallout, the leader (/CL), its arrowhead (/LE) and where the box is in the rect
+// (/RD). `dict`: from the dictionary's "<<" on. Empty if it isn't one.
+std::string calloutDict(std::string_view dict, std::size_t& length) {
+  std::vector<Entry> entries;
+  std::size_t close = 0;
+  if (!readEntries(dict, entries, close)) return {};
+  length = close;
+  double v[10], rect[4];
+  bool haveCallout = false, haveRect = false;
+  for (const Entry& e : entries) {
+    if (e.key == "/PDFZCallout") {
+      const std::string text = literal(e.first);
+      const char* c = text.c_str();
+      int got = 0;
+      for (char* end = nullptr; got < 10; ++got, c = end) {
+        v[got] = std::strtod(c, &end);
+        if (end == c) break;
+      }
+      haveCallout = got == 10;
+    }
+    if (e.key == "/Rect" && e.first == "[") {
+      const std::string text(dict.substr(e.start, e.end - e.start));
+      const char* c = text.c_str() + text.find('[') + 1;
+      int got = 0;
+      for (char* end = nullptr; got < 4; ++got, c = end) {
+        rect[got] = std::strtod(c, &end);
+        if (end == c) break;
+      }
+      haveRect = got == 4;
+    }
+  }
+  if (!haveCallout || !haveRect) return {};
+  const double rl = std::min(rect[0], rect[2]), rr = std::max(rect[0], rect[2]);
+  const double rb = std::min(rect[1], rect[3]), rt = std::max(rect[1], rect[3]);
+  char buf[400];
+  std::snprintf(buf, sizeof buf, "/IT/FreeTextCallout/LE/OpenArrow/CL[%.3f %.3f %.3f %.3f %.3f %.3f]/RD[%.3f %.3f %.3f %.3f]",
+                v[0], v[1], v[2], v[3], v[4], v[5], std::max(0.0, v[6] - rl), std::max(0.0, rt - v[9]),
+                std::max(0.0, rr - v[8]), std::max(0.0, v[7] - rb));
   std::string out = "<<";
   for (const Entry& e : entries)
-    if (e.key != "/AP" && e.key != "/PDFIUM_HasGeneratedAP") out.append(body.data() + e.start, e.end - e.start);
+    if (e.key != "/IT" && e.key != "/LE" && e.key != "/CL" && e.key != "/RD") out.append(dict.data() + e.start, e.end - e.start);
+  out += buf;
   out += ">>";
-  out.append(body.data() + close, body.size() - close);
   return out;
+}
+
+// The object (its bytes from just after "obj") with every callout in it given those entries:
+// the annotation on its own, or (PDFium writes new annotations into the page's /Annots) the
+// page with it. Empty if there are none.
+std::string withCalloutEntries(std::string_view body) {
+  if (body.find("/PDFZCallout") == std::string_view::npos) return {};
+  // The dictionaries with /PDFZCallout in them, up to the object's end.
+  const auto* d = reinterpret_cast<const std::uint8_t*>(body.data());
+  Lexer lx{d, body.size(), 0};
+  std::vector<std::size_t> open, found;
+  for (int guard = 0; guard < 10'000'000; ++guard) {
+    lx.skip();
+    const std::size_t at = lx.pos;
+    const std::string_view t = lx.next();
+    if (t.empty() || t == "stream" || t == "endobj") break;
+    if (t == "<<") open.push_back(at);
+    else if (t == ">>" && !open.empty()) open.pop_back();
+    else if (t == "/PDFZCallout" && !open.empty()) found.push_back(open.back());
+  }
+  if (found.empty()) return {};
+  std::string out(body);
+  bool changed = false;
+  for (auto it = found.rbegin(); it != found.rend(); ++it) {  // from the end, so the places before stay put
+    std::size_t length = 0;
+    const std::string dict = calloutDict(std::string_view(out).substr(*it), length);
+    if (dict.empty()) continue;
+    out.replace(*it, length, dict);
+    changed = true;
+  }
+  return changed ? out : std::string();
 }
 
 }  // namespace
@@ -250,13 +355,16 @@ std::vector<std::uint8_t> withoutUnusedObjects(const std::vector<std::uint8_t>& 
   std::map<long, std::vector<std::uint8_t>> rewritten;
   for (const auto& [num, se] : span) {
     const std::string_view obj(all.data() + se.first, se.second - se.first);
-    if (obj.find("PDFIUM_HasGeneratedAP") == std::string_view::npos) continue;
+    if (obj.find("PDFIUM_HasGeneratedAP") == std::string_view::npos && obj.find("/PDFZCallout") == std::string_view::npos)
+      continue;
     Lexer ol{pdf.data(), se.second, se.first};
     if (ol.next() != std::to_string(num)) continue;
     ol.next();
     if (ol.next() != "obj") continue;
     const std::size_t bodyAt = ol.pos;
-    const std::string body = withoutGeneratedAppearance(obj.substr(bodyAt - se.first));
+    const std::string_view was = obj.substr(bodyAt - se.first);
+    std::string body = withoutGeneratedAppearance(was);
+    if (body.empty()) body = withCalloutEntries(was);
     if (body.empty()) continue;
     std::vector<std::uint8_t> bytes(pdf.begin() + std::ptrdiff_t(se.first), pdf.begin() + std::ptrdiff_t(bodyAt));
     bytes.insert(bytes.end(), body.begin(), body.end());

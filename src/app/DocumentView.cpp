@@ -41,6 +41,52 @@ const QColor kSelectionColor(0x9E, 0xC9, 0xFF);
 const QColor kMatchColor(0xFF, 0xE4, 0x5C);
 const QColor kCurrentMatchColor(0xFF, 0x9F, 0x43);
 const QColor kFieldColor(0xDD, 0xE6, 0xFF);
+
+// The comment moved by (dx, dy): everything about where it is.
+pdfz::Annotation translated(pdfz::Annotation a, double dx, double dy) {
+  a.rect = {a.rect.left + dx, a.rect.top + dy, a.rect.right + dx, a.rect.bottom + dy};
+  for (pdfz::RectF& q : a.quads) q = {q.left + dx, q.top + dy, q.right + dx, q.bottom + dy};
+  for (auto& stroke : a.ink)
+    for (pdfz::PointF& p : stroke) p = {p.x + dx, p.y + dy};
+  for (pdfz::PointF& p : a.callout) p = {p.x + dx, p.y + dy};
+  return a;
+}
+
+// `to`, brought back along the line from `from` (on the page) until it's on the page too, so
+// the line keeps its direction (a 45-degree one stays 45 degrees at the page's edge).
+pdfz::PointF alongOntoPage(pdfz::PointF from, pdfz::PointF to, pdfz::SizeF page) {
+  double t = 1;
+  const double dx = to.x - from.x, dy = to.y - from.y;
+  if (to.x < 0 && dx < 0) t = std::min(t, -from.x / dx);
+  if (to.x > page.width && dx > 0) t = std::min(t, (page.width - from.x) / dx);
+  if (to.y < 0 && dy < 0) t = std::min(t, -from.y / dy);
+  if (to.y > page.height && dy > 0) t = std::min(t, (page.height - from.y) / dy);
+  t = std::max(0.0, t);
+  return {from.x + dx * t, from.y + dy * t};
+}
+
+// What a selected comment's frame goes round.
+pdfz::RectF boundsOf(const pdfz::Annotation& a) {
+  if (pdfz::isTextMarkup(a.kind) && !a.quads.empty()) {
+    pdfz::RectF r;
+    for (const pdfz::RectF& q : a.quads) r = r.united(q);
+    return r;
+  }
+  return a.isCallout() ? calloutBounds(a) : a.rect;
+}
+
+// A new callout, from the press on what it points to (`tip`) to where the mouse is (`end`); a
+// click alone puts its box up and to the right.
+pdfz::Annotation newCallout(const MarkupStyle& style, pdfz::PointF tip, pdfz::PointF end, bool moved, pdfz::SizeF page) {
+  pdfz::Annotation a;
+  a.kind = pdfz::AnnotKind::FreeText;
+  applyStyle(a, style);
+  a.subject = "Callout";
+  const double line = QFontMetricsF(fontFor(a.fontName, 1000)).height() / 1000 * a.fontSize;
+  if (!moved) end = {tip.x + 40, tip.y - 40};
+  placeCallout(a, tip, end, 144, line + 2 * textBoxPadding(a), page.width, page.height);
+  return a;
+}
 }  // namespace
 
 DocumentView::DocumentView(PageRenderer* renderer, TextCache* text, TextSearch* search, AnnotationCache* annots,
@@ -452,7 +498,19 @@ void DocumentView::wheelEvent(QWheelEvent* e) {
   QAbstractScrollArea::wheelEvent(e);
 }
 
+void DocumentView::keyReleaseEvent(QKeyEvent* e) {
+  if (e->key() == Qt::Key_Shift && drag_ != Drag::None) {
+    snapShift_ = false;
+    viewport()->update();
+  }
+  QAbstractScrollArea::keyReleaseEvent(e);
+}
+
 void DocumentView::keyPressEvent(QKeyEvent* e) {
+  if (e->key() == Qt::Key_Shift && drag_ != Drag::None) {  // lines snap to 45 degrees from now
+    snapShift_ = true;
+    viewport()->update();
+  }
   const bool noHScroll = horizontalScrollBar()->maximum() == 0;
   // Edit PDF: the arrow keys move the selection a point (Shift: ten).
   if (tool_ == Tool::Edit && contentPage_ >= 0 && !(e->modifiers() & (Qt::ControlModifier | Qt::AltModifier))) {
@@ -534,7 +592,8 @@ bool isTextMarkupTool(MarkupTool t) {
   return t == MarkupTool::Highlight || t == MarkupTool::Underline || t == MarkupTool::StrikeOut;
 }
 bool isDragTool(MarkupTool t) {
-  return t == MarkupTool::TextBox || t == MarkupTool::FillText || t == MarkupTool::Pen || t == MarkupTool::Rectangle ||
+  return t == MarkupTool::TextBox || t == MarkupTool::Callout || t == MarkupTool::FillText || t == MarkupTool::Pen ||
+         t == MarkupTool::Rectangle ||
          t == MarkupTool::Ellipse || t == MarkupTool::Line || t == MarkupTool::Arrow;
 }
 }  // namespace
@@ -570,8 +629,21 @@ void DocumentView::mousePressEvent(QMouseEvent* e) {
     return;
   }
 
-  // The selected comment's corner handles, then the comment itself.
+  // The selected comment's handles (a line's ends, a callout's tip and knee, the corners and
+  // sides), then the comment itself.
+  snapShift_ = (e->modifiers() & Qt::ShiftModifier) != 0;
+  moveCalloutBox_ = false;
   if (left && tool_ != Tool::Hand) {
+    const int handle = pointHandleUnder(pos);
+    if (handle >= 0) {
+      drag_ = Drag::MoveHandle;
+      dragPage_ = selPage_;
+      resizeCorner_ = handle;
+      dragStart_ = dragNow_ = pointOnPage(selPage_, pos);
+      dragMoved_ = false;
+      e->accept();
+      return;
+    }
     const int corner = resizeHandleUnder(pos);
     if (corner >= 0) {
       drag_ = Drag::ResizeAnnot;
@@ -595,6 +667,12 @@ void DocumentView::mousePressEvent(QMouseEvent* e) {
         dragPage_ = page;
         dragStart_ = dragNow_ = pointOnPage(page, pos);
         dragMoved_ = false;
+        // A callout dragged by its box: the box (and the knee) move, what it points to doesn't.
+        // By its leader: all of it.
+        const double tol = 3 / pagePixelsPerPoint(page);
+        const pdfz::RectF b = a.rect.normalized();
+        moveCalloutBox_ = a.isCallout() && dragStart_.x() >= b.left - tol && dragStart_.x() <= b.right + tol &&
+                          dragStart_.y() >= b.top - tol && dragStart_.y() <= b.bottom + tol;
       }
       e->accept();
       return;
@@ -752,6 +830,7 @@ void DocumentView::mouseDoubleClickEvent(QMouseEvent* e) {
 
 void DocumentView::mouseMoveEvent(QMouseEvent* e) {
   if (drag_ != Drag::None) {
+    snapShift_ = (e->modifiers() & Qt::ShiftModifier) != 0;
     QPointF pt = pointOnPage(dragPage_, e->position());
     if (renderer_->document()) {  // keep drawing on the page
       const pdfz::SizeF s = renderer_->document()->pageSize(dragPage_);
@@ -814,6 +893,8 @@ void DocumentView::mouseMoveEvent(QMouseEvent* e) {
 
 void DocumentView::mouseReleaseEvent(QMouseEvent* e) {
   if (drag_ != Drag::None && e->button() == Qt::LeftButton) {
+    const bool reshape = dragMoved_ && reshaping();
+    const pdfz::Annotation shape = reshape ? reshaped() : pdfz::Annotation{};
     const Drag d = drag_;
     drag_ = Drag::None;
     if (d == Drag::WidenEditor) {
@@ -821,6 +902,8 @@ void DocumentView::mouseReleaseEvent(QMouseEvent* e) {
         fitContentEditor();
         contentEditor_->setFocus(Qt::OtherFocusReason);
       }
+    } else if ((d == Drag::MoveHandle || (d == Drag::MoveAnnot && moveCalloutBox_)) && reshape) {
+      emit annotationReshaped(dragPage_, selIndex_, shape);
     } else if (d == Drag::MoveAnnot && dragMoved_) {
       emit annotationMoved(dragPage_, selIndex_, dragNow_.x() - dragStart_.x(), dragNow_.y() - dragStart_.y());
     } else if (d == Drag::ResizeAnnot && dragMoved_) {
@@ -862,8 +945,12 @@ void DocumentView::finishCreate() {
   if (!doc || dragPage_ < 0) return;
   pdfz::Annotation a;
   const pdfz::RectF box = pdfz::RectF{dragStart_.x(), dragStart_.y(), dragNow_.x(), dragNow_.y()}.normalized();
-  const pdfz::PointF p0{dragStart_.x(), dragStart_.y()}, p1{dragNow_.x(), dragNow_.y()};
+  const QPointF end = createEnd();
+  const pdfz::PointF p0{dragStart_.x(), dragStart_.y()}, p1{end.x(), end.y()};
   switch (markupTool_) {
+    case MarkupTool::Callout:
+      startTextEdit(dragPage_, -1, newCallout(markupStyle_, p0, p1, dragMoved_, doc->pageSize(dragPage_)));
+      return;
     case MarkupTool::TextBox:
     case MarkupTool::FillText: {
       a.kind = pdfz::AnnotKind::FreeText;
@@ -987,9 +1074,16 @@ void DocumentView::updateHoverCursor(QPointF pos) {
     if (hoverContentPage_ != oldHover || !(hoverContentRect_ == oldRect)) viewport()->update();
     return;
   }
+  if (tool_ != Tool::Hand && pointHandleUnder(pos) >= 0) {
+    viewport()->setCursor(Qt::CrossCursor);
+    return;
+  }
   const int corner = tool_ != Tool::Hand ? resizeHandleUnder(pos) : -1;
   if (corner >= 0) {
-    viewport()->setCursor(corner == 0 || corner == 3 ? Qt::SizeFDiagCursor : Qt::SizeBDiagCursor);
+    static const Qt::CursorShape shapes[8] = {Qt::SizeFDiagCursor, Qt::SizeBDiagCursor, Qt::SizeBDiagCursor,
+                                              Qt::SizeFDiagCursor, Qt::SizeVerCursor,   Qt::SizeHorCursor,
+                                              Qt::SizeVerCursor,   Qt::SizeHorCursor};
+    viewport()->setCursor(shapes[corner]);
     return;
   }
   int page, listPos;
@@ -1126,24 +1220,22 @@ const pdfz::Annotation* DocumentView::selected() const {
 
 pdfz::RectF DocumentView::selectedBounds() const {
   const pdfz::Annotation* a = selected();
-  if (!a) return {};
-  if (pdfz::isTextMarkup(a->kind) && !a->quads.empty()) {
-    pdfz::RectF r;
-    for (const pdfz::RectF& q : a->quads) r = r.united(q);
-    return r;
-  }
-  return a->rect;
+  return a ? boundsOf(*a) : pdfz::RectF{};
 }
 
 pdfz::RectF DocumentView::resizedBounds() const {
   const pdfz::Annotation* a = selected();
-  pdfz::RectF r = selectedBounds();
-  if (!a) return r;
+  if (!a) return {};
+  pdfz::RectF r = a->rect.normalized();
   const pdfz::RectF start = r;
   const double dx = dragNow_.x() - dragStart_.x(), dy = dragNow_.y() - dragStart_.y();
-  const bool left = resizeCorner_ == 0 || resizeCorner_ == 2, top = resizeCorner_ == 0 || resizeCorner_ == 1;
-  if (left) r.left += dx; else r.right += dx;
-  if (top) r.top += dy; else r.bottom += dy;
+  const int c = resizeCorner_;
+  const bool left = c == 0 || c == 2 || c == 7, right = c == 1 || c == 3 || c == 5;
+  const bool top = c == 0 || c == 1 || c == 4, bottom = c == 2 || c == 3 || c == 6;
+  if (left) r.left += dx;
+  if (right) r.right += dx;
+  if (top) r.top += dy;
+  if (bottom) r.bottom += dy;
   // A stamp (a signature) keeps its shape: the corner follows the larger of the two moves.
   if (a->kind == pdfz::AnnotKind::Stamp && start.width() > 0 && start.height() > 0) {
     const double k = std::max(std::abs(r.width()) / start.width(), std::abs(r.height()) / start.height());
@@ -1204,11 +1296,134 @@ void DocumentView::startPlacing(const pdfz::Annotation& stamp, const pdfz::Stamp
 int DocumentView::resizeHandleUnder(QPointF vp) const {
   const pdfz::Annotation* a = selected();
   if (!a || !canResize(*a)) return -1;
-  const QRectF r = toViewport(selPage_, a->rect);
-  const QPointF corners[] = {r.topLeft(), r.topRight(), r.bottomLeft(), r.bottomRight()};
-  for (int i = 0; i < 4; ++i)
-    if (std::abs(vp.x() - corners[i].x()) <= 6 && std::abs(vp.y() - corners[i].y()) <= 6) return i;
+  const QRectF r = toViewport(selPage_, a->rect.normalized());
+  const QPointF c = r.center();
+  const QPointF handles[] = {r.topLeft(),           r.topRight(),         r.bottomLeft(),          r.bottomRight(),
+                             QPointF(c.x(), r.top()), QPointF(r.right(), c.y()), QPointF(c.x(), r.bottom()), QPointF(r.left(), c.y())};
+  const int n = a->kind == pdfz::AnnotKind::Stamp ? 4 : 8;
+  for (int i = 0; i < n; ++i)
+    if (std::abs(vp.x() - handles[i].x()) <= 6 && std::abs(vp.y() - handles[i].y()) <= 6) return i;
   return -1;
+}
+
+std::vector<pdfz::PointF> DocumentView::pointHandles(const pdfz::Annotation& a) const {
+  if (isLineOrArrow(a)) return {a.ink[0][0], a.ink[0][1]};
+  if (a.isCallout()) return {a.callout[0], a.callout[1]};
+  return {};
+}
+
+int DocumentView::pointHandleUnder(QPointF vp) const {
+  const pdfz::Annotation* a = selected();
+  if (!a) return -1;
+  const std::vector<pdfz::PointF> pts = pointHandles(*a);
+  for (int i = int(pts.size()) - 1; i >= 0; --i)  // the tip first (it's drawn last)
+    if (QLineF(vp, toViewport(selPage_, pts[std::size_t(i)].x, pts[std::size_t(i)].y)).length() <= 6.5) return i;
+  return -1;
+}
+
+bool DocumentView::reshaping() const {
+  const pdfz::Annotation* a = selected();
+  if (!a || !dragMoved_) return false;
+  return drag_ == Drag::MoveHandle || (drag_ == Drag::MoveAnnot && moveCalloutBox_) ||
+         (drag_ == Drag::ResizeAnnot && a->isCallout());
+}
+
+pdfz::Annotation DocumentView::reshaped() const {
+  const pdfz::Annotation* s = selected();
+  if (!s) return {};
+  pdfz::Annotation a = *s;
+  const double dx = dragNow_.x() - dragStart_.x(), dy = dragNow_.y() - dragStart_.y();
+  if (drag_ == Drag::MoveHandle) {
+    const std::vector<pdfz::PointF> pts = pointHandles(a);
+    const int h = resizeCorner_;
+    if (h < 0 || h >= int(pts.size())) return a;
+    const pdfz::PointF other = pts[std::size_t(1 - h)];
+    pdfz::PointF p{pts[std::size_t(h)].x + dx, pts[std::size_t(h)].y + dy};
+    if (snapShift_) p = snapTo45(other, p);
+    if (renderer_->document()) {
+      const pdfz::SizeF size = renderer_->document()->pageSize(selPage_);
+      p = snapShift_ ? alongOntoPage(other, p, size)
+                     : pdfz::PointF{std::clamp(p.x, 0.0, size.width), std::clamp(p.y, 0.0, size.height)};
+    }
+    if (isLineOrArrow(a)) {
+      if (h == 0) setLineEnds(a, p, pts[1]);
+      else setLineEnds(a, pts[0], p);
+    } else if (a.isCallout()) {
+      a.callout[std::size_t(h)] = p;
+      fitCallout(a);
+    }
+  } else if (drag_ == Drag::MoveAnnot && moveCalloutBox_ && a.isCallout()) {
+    a.rect = {a.rect.left + dx, a.rect.top + dy, a.rect.right + dx, a.rect.bottom + dy};
+    a.callout[1] = {a.callout[1].x + dx, a.callout[1].y + dy};
+    fitCallout(a);
+  } else if (drag_ == Drag::ResizeAnnot) {
+    a.rect = resizedBounds();
+    fitCallout(a);
+  }
+  return a;
+}
+
+QPointF DocumentView::createEnd() const {
+  if (!snapShift_ || (markupTool_ != MarkupTool::Line && markupTool_ != MarkupTool::Arrow)) return dragNow_;
+  const pdfz::PointF from{dragStart_.x(), dragStart_.y()};
+  pdfz::PointF p = snapTo45(from, {dragNow_.x(), dragNow_.y()});
+  if (renderer_->document()) p = alongOntoPage(from, p, renderer_->document()->pageSize(dragPage_));
+  return {p.x, p.y};
+}
+
+void DocumentView::paintGhost(QPainter& p, int page, const pdfz::Annotation& a, double opacity) const {
+  if (page < 0 || page >= int(pageRects_.size())) return;
+  const double ppp = pagePixelsPerPoint(page);
+  p.save();
+  p.setOpacity(opacity * a.opacity);
+  const QColor c = toQColor(a.color);
+  const double w = a.borderWidth * ppp;
+  QPen pen(c, std::max(1.0, w), Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
+  p.setPen(pen);
+  p.setBrush(Qt::NoBrush);
+  auto poly = [&](const std::vector<pdfz::PointF>& pts) {
+    QPolygonF out;
+    for (const pdfz::PointF& pt : pts) out << toViewport(page, pt.x, pt.y);
+    return out;
+  };
+  switch (a.kind) {
+    case pdfz::AnnotKind::Ink:
+    case pdfz::AnnotKind::Line:
+      for (const auto& stroke : a.ink) p.drawPolyline(poly(stroke));
+      break;
+    case pdfz::AnnotKind::Square:
+    case pdfz::AnnotKind::Circle: {
+      const QRectF r = toViewport(page, a.rect.normalized()).adjusted(w / 2, w / 2, -w / 2, -w / 2);
+      if (a.hasFill) p.setBrush(toQColor(a.fill));
+      if (w <= 0) p.setPen(Qt::NoPen);
+      if (a.kind == pdfz::AnnotKind::Square) {
+        pen.setJoinStyle(Qt::MiterJoin);
+        if (w > 0) p.setPen(pen);
+        p.drawRect(r);
+      } else {
+        p.drawEllipse(r);
+      }
+      break;
+    }
+    case pdfz::AnnotKind::FreeText: {
+      const QRectF r = toViewport(page, a.rect.normalized());
+      if (a.hasFill) p.fillRect(r, toQColor(a.fill));
+      if (w > 0) {
+        p.setPen(QPen(c, w, Qt::SolidLine, Qt::SquareCap, Qt::MiterJoin));
+        p.drawRect(r.adjusted(w / 2, w / 2, -w / 2, -w / 2));
+      }
+      if (a.isCallout()) {
+        p.setPen(QPen(c, std::max(1.0, a.borderWidth) * ppp, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+        const auto [h1, h2] = calloutHead(a);
+        p.drawPolyline(poly({a.callout[2], a.callout[1], a.callout[0]}));
+        p.drawPolyline(poly({h1, a.callout[0], h2}));
+      }
+      break;
+    }
+    default:
+      break;
+  }
+  p.restore();
 }
 
 bool DocumentView::selectedAnnotation(int& page, int& index) const {
@@ -1246,27 +1461,45 @@ void DocumentView::paintOverlays(QPainter& p) {
   const QColor accent = palette().color(QPalette::Highlight);
   if (tool_ == Tool::Edit) paintContent(p);
 
-  // The selected comment: a dashed frame, with corner handles if it can be resized.
-  if (const pdfz::Annotation* a = selected()) {
-    QRectF r = toViewport(selPage_, selectedBounds());
-    if (drag_ == Drag::MoveAnnot && dragMoved_) {
-      const double ppp = pagePixelsPerPoint(selPage_);
-      r.translate((dragNow_ - dragStart_) * ppp);
+  // The selected comment: a dashed frame, with handles on its corners and sides if it can be
+  // resized; round ones on a line's ends and a callout's tip and knee (no frame for a line).
+  // While it's dragged, it's drawn where it's going.
+  if (const pdfz::Annotation* sel = selected()) {
+    const double dx = dragNow_.x() - dragStart_.x(), dy = dragNow_.y() - dragStart_.y();
+    pdfz::Annotation shown = *sel;
+    bool ghost = false;
+    if (reshaping()) {
+      shown = reshaped();
+      ghost = true;
+    } else if (drag_ == Drag::MoveAnnot && dragMoved_) {
+      shown = translated(*sel, dx, dy);
+      ghost = true;
     } else if (drag_ == Drag::ResizeAnnot && dragMoved_) {
-      r = toViewport(selPage_, resizedBounds());
+      shown.rect = resizedBounds();
+      ghost = true;
     }
-    r.adjust(-3, -3, 3, 3);
-    QPen pen(accent, 1.5, Qt::DashLine);
-    p.setPen(pen);
-    p.setBrush(Qt::NoBrush);
-    p.drawRect(r);
-    if (canResize(*a)) {
+    if (ghost) paintGhost(p, selPage_, shown);
+    if (!isLineOrArrow(shown)) {
+      QRectF r = toViewport(selPage_, boundsOf(shown));
+      r.adjust(-3, -3, 3, 3);
+      p.setPen(QPen(accent, 1.5, Qt::DashLine));
+      p.setBrush(Qt::NoBrush);
+      p.drawRect(r);
+    }
+    if (canResize(shown)) {
       p.setPen(QPen(accent, 1));
       p.setBrush(Qt::white);
-      const QRectF ar = toViewport(selPage_, a->rect);
-      for (QPointF c : {ar.topLeft(), ar.topRight(), ar.bottomLeft(), ar.bottomRight()})
-        p.drawRect(QRectF(c.x() - 4, c.y() - 4, 8, 8));
+      const QRectF ar = toViewport(selPage_, shown.rect.normalized());
+      const QPointF c = ar.center();
+      std::vector<QPointF> hs{ar.topLeft(), ar.topRight(), ar.bottomLeft(), ar.bottomRight()};
+      if (shown.kind != pdfz::AnnotKind::Stamp)
+        hs.insert(hs.end(), {QPointF(c.x(), ar.top()), QPointF(ar.right(), c.y()), QPointF(c.x(), ar.bottom()),
+                             QPointF(ar.left(), c.y())});
+      for (QPointF h : hs) p.drawRect(QRectF(h.x() - 4, h.y() - 4, 8, 8));
     }
+    p.setPen(QPen(accent, 1.5));
+    p.setBrush(Qt::white);
+    for (const pdfz::PointF& h : pointHandles(shown)) p.drawEllipse(toViewport(selPage_, h.x, h.y), 4.5, 4.5);
   }
 
   // The stamp about to be placed, under the mouse.
@@ -1308,8 +1541,12 @@ void DocumentView::paintOverlays(QPainter& p) {
     const QRectF r = toViewport(editPage_, editAnnot_.rect.normalized());
     const double ppp = pagePixelsPerPoint(editPage_);
     p.setOpacity(editAnnot_.opacity);
-    if (editAnnot_.hasFill) p.fillRect(r, toQColor(editAnnot_.fill));
-    if (editAnnot_.borderWidth > 0) {
+    if (editAnnot_.isCallout()) {  // its box and leader
+      paintGhost(p, editPage_, editAnnot_, 1.0);
+    } else if (editAnnot_.hasFill) {
+      p.fillRect(r, toQColor(editAnnot_.fill));
+    }
+    if (editAnnot_.borderWidth > 0 && !editAnnot_.isCallout()) {
       const double w = editAnnot_.borderWidth * ppp;
       p.setPen(QPen(toQColor(editAnnot_.color), w, Qt::SolidLine, Qt::SquareCap, Qt::MiterJoin));
       p.setBrush(Qt::NoBrush);
@@ -1331,9 +1568,18 @@ void DocumentView::paintOverlays(QPainter& p) {
     p.setOpacity(markupStyle_.opacity);
     if (markupStyle_.fill.isValid() && usesFill(markupTool_) && markupTool_ != MarkupTool::TextBox)
       p.setBrush(markupStyle_.fill);
+    const QPointF end = createEnd();
     const QPointF a = toViewport(dragPage_, dragStart_.x(), dragStart_.y());
-    const QPointF b = toViewport(dragPage_, dragNow_.x(), dragNow_.y());
+    const QPointF b = toViewport(dragPage_, end.x(), end.y());
     switch (markupTool_) {
+      case MarkupTool::Callout:
+        if (renderer_->document()) {
+          const pdfz::Annotation callout = newCallout(markupStyle_, {dragStart_.x(), dragStart_.y()}, {end.x(), end.y()},
+                                                      dragMoved_, renderer_->document()->pageSize(dragPage_));
+          p.setOpacity(1);
+          paintGhost(p, dragPage_, callout, 0.8);
+        }
+        break;
       case MarkupTool::Rectangle: {
         pen.setJoinStyle(Qt::MiterJoin);
         p.setPen(pen);
@@ -1348,8 +1594,7 @@ void DocumentView::paintOverlays(QPainter& p) {
       }
       case MarkupTool::Line: p.drawLine(a, b); break;
       case MarkupTool::Arrow:
-        for (const auto& stroke : arrowStrokes({dragStart_.x(), dragStart_.y()}, {dragNow_.x(), dragNow_.y()},
-                                               markupStyle_.width)) {
+        for (const auto& stroke : arrowStrokes({dragStart_.x(), dragStart_.y()}, {end.x(), end.y()}, markupStyle_.width)) {
           QPolygonF poly;
           for (const pdfz::PointF& pt : stroke) poly << toViewport(dragPage_, pt.x, pt.y);
           p.drawPolyline(poly);
@@ -1481,6 +1726,7 @@ void DocumentView::fitEditorHeight() {
     changed = true;
   }
   if (!changed) return;
+  fitCallout(editAnnot_);  // its leader still meets the box in the middle of a side
   layoutEditor(false);
   viewport()->update();
 }

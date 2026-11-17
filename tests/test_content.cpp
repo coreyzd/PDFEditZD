@@ -11,6 +11,7 @@
 #include <set>
 
 #include <fpdf_edit.h>
+#include <fpdf_transformpage.h>
 #include <fpdfview.h>
 
 #include "core/engine.hpp"
@@ -693,4 +694,50 @@ TEST_CASE("a page's drawing as shapes: paths and the outlines of text") {
   CHECK(tx0 == doctest::Approx(50).epsilon(0.05));
   CHECK(tx1 > 70);
   CHECK(tx1 < 90);
+}
+
+TEST_CASE("a drawing (another PDF's page) added as vector content: one piece, where it was put") {
+  // The drawing: a black triangle in the lower half of a 100 x 50 page whose box isn't at 0, 0.
+  auto art = Document::create();
+  REQUIRE(art->insertBlankPage(0, {100, 50}));
+  std::vector<std::uint8_t> artPdf;
+  {
+    std::lock_guard lock(pdfz::engineMutex());
+    FPDF_PAGE p = FPDF_LoadPage(static_cast<FPDF_DOCUMENT>(art->handle()), 0);
+    FPDFPage_SetMediaBox(p, 10, 20, 110, 70);
+    FPDF_PAGEOBJECT path = FPDFPageObj_CreateNewPath(10, 20);
+    FPDFPath_LineTo(path, 110, 20);
+    FPDFPath_LineTo(path, 60, 45);
+    FPDFPath_Close(path);
+    FPDFPageObj_SetFillColor(path, 0, 0, 0, 255);
+    FPDFPath_SetDrawMode(path, FPDF_FILLMODE_WINDING, false);
+    FPDFPage_InsertObject(p, path);
+    FPDFPage_GenerateContent(p);
+    FPDF_ClosePage(p);
+  }
+  artPdf = art->saveToMemory();
+  for (int rotation : {0, 90}) {
+    CAPTURE(rotation);
+    auto doc = page();
+    if (rotation) REQUIRE(doc->setPageRotation(0, rotation));
+    const pdfz::SizeF s = doc->pageSize(0);
+    const pdfz::RectF where{s.width / 2 - 100, s.height / 2 - 50, s.width / 2 + 100, s.height / 2 + 50};  // twice the size
+    REQUIRE(doc->addContentDrawing(0, artPdf, where));
+    auto saved = reopen(*doc);
+    for (const Document* d : {doc.get(), saved.get()}) {
+      const auto blocks = d->contentBlocks(0);
+      REQUIRE(blocks.size() == 1);
+      CHECK(blocks[0].kind == ContentBlock::Kind::Graphic);
+      CHECK(blocks[0].rect.top == doctest::Approx(where.top + 50).epsilon(0.01));  // the triangle's top
+      CHECK(blocks[0].rect.left == doctest::Approx(where.left).epsilon(0.01));
+      CHECK(blocks[0].rect.right == doctest::Approx(where.right).epsilon(0.01));
+      CHECK(blocks[0].rect.bottom == doctest::Approx(where.bottom).epsilon(0.01));
+      // The triangle is the lower half, upright on the screen; the upper half is empty.
+      const pdfz::RectF lower{where.left + 80, where.top + 60, where.right - 80, where.bottom - 5};
+      const pdfz::RectF upper{where.left, where.top, where.right, where.top + 45};
+      CHECK(ink(*d, lower) > 1000);
+      CHECK(ink(*d, upper) == 0);
+    }
+    CHECK_FALSE(doc->addContentDrawing(0, {1, 2, 3}, where));  // not a PDF
+  }
 }

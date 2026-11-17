@@ -66,6 +66,18 @@ QPixmap draw(MarkupTool tool, const QColor& ink, qreal dpr) {
       p.setPen(pen);
       p.drawText(QRectF(3, 4, 18, 16), Qt::AlignCenter, QStringLiteral("T"));
       break;
+    case MarkupTool::Callout: {  // a small text box, its leader down to an arrowhead
+      QFont small = f;
+      small.setPixelSize(10);
+      p.setFont(small);
+      p.setPen(QPen(ink, 1.2));
+      p.drawRect(QRectF(10.5, 3.5, 11, 10));
+      p.drawText(QRectF(10.5, 3.5, 11, 10), Qt::AlignCenter, QStringLiteral("T"));
+      p.setPen(QPen(ink, 1.3, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+      p.drawPolyline(QPolygonF({QPointF(10.5, 8.5), QPointF(7.5, 8.5), QPointF(3, 20.5)}));
+      p.drawPolyline(QPolygonF({QPointF(2.6, 15.8), QPointF(3, 20.5), QPointF(6.4, 17.3)}));
+      break;
+    }
     case MarkupTool::Pen: {
       QPainterPath s;
       s.moveTo(3, 17);
@@ -419,12 +431,13 @@ QIcon fitWidthIcon(const QPalette& palette) {
 QIcon actualSizeIcon(const QPalette& palette) {
   return drawnIcon(palette, 20, [&](QPainter& p, const QColor& ink, bool) {
     p.setPen(QPen(ink, 1.2, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-    p.drawRoundedRect(QRectF(2.5, 4, 15, 12), 1.5, 1.5);
+    // A page frame with "1:1" in it (Windows' icon theme gives Actual Size Find's magnifier).
+    p.drawRoundedRect(QRectF(1.5, 3.5, 17, 13), 1.5, 1.5);
     QFont f = p.font();
-    f.setPixelSize(8);
+    f.setPixelSize(9);
     f.setBold(true);
     p.setFont(f);
-    p.drawText(QRectF(2.5, 4, 15, 12), Qt::AlignCenter, QStringLiteral("1:1"));
+    p.drawText(QRectF(1.5, 3.5, 17, 13), Qt::AlignCenter, QStringLiteral("1:1"));
   });
 }
 

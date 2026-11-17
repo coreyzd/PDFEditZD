@@ -59,5 +59,9 @@ QPainterPath parsePathData(const QString& d);
 // Writes `art`, `sizePt` big, as a PDF of one page that size (vector, through Qt's PDF writer),
 // or a picture in one (`image`, if art is empty).
 bool writeVectorPdf(const QString& file, const VectorArt& art, QSizeF sizePt, const QImage& image = {});
+// An SVG file drawn into a PDF of one page (through Qt SVG and Qt's PDF writer, so it stays
+// vector, with its strokes, gradients, transparency and pictures), its size in points (CSS
+// pixels at 96 to the inch). Empty if it can't be read.
+QByteArray svgAsPdf(const QString& path, QSizeF* sizePt, QString* error);
 // An SVG of a picture (embedded as PNG), `sizePt` big.
 QByteArray imageSvg(const QImage& image, QSizeF sizePt);

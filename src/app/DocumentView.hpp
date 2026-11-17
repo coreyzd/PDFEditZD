@@ -188,6 +188,9 @@ signals:
   void stampCreated(int page, const pdfz::Annotation& stamp, const pdfz::StampDrawing& drawing);
   void annotationMoved(int page, int index, double dx, double dy);  // display points
   void annotationResized(int page, int index, const pdfz::RectF& rect);
+  // A line's or an arrow's end dragged, a callout's tip or knee, or its box moved: `a` is how
+  // it is now.
+  void annotationReshaped(int page, int index, const pdfz::Annotation& a);
   void annotationEditRequested(int page, int index);
   void annotationDeleteRequested(int page, int index);
   void annotationSelectionChanged(int page, int index);  // -1, -1 for none
@@ -223,6 +226,7 @@ protected:
   void scrollContentsBy(int dx, int dy) override;
   void wheelEvent(QWheelEvent*) override;
   void keyPressEvent(QKeyEvent*) override;
+  void keyReleaseEvent(QKeyEvent*) override;
   void mousePressEvent(QMouseEvent*) override;
   void mouseMoveEvent(QMouseEvent*) override;
   void mouseReleaseEvent(QMouseEvent*) override;
@@ -279,8 +283,22 @@ private:
   bool annotationUnder(QPointF viewportPos, int& page, int& listPos) const;
   const pdfz::Annotation* selected() const;
   pdfz::RectF selectedBounds() const;  // display points
-  int resizeHandleUnder(QPointF viewportPos) const;  // 0..3 (TL, TR, BL, BR), or -1
-  pdfz::RectF resizedBounds() const;  // the selected comment's rect as the corner drag has it
+  // The selected comment's resize handles: 0..3 the corners (TL, TR, BL, BR), 4..7 the sides
+  // (top, right, bottom, left; not for stamps, which keep their shape). -1 for none.
+  int resizeHandleUnder(QPointF viewportPos) const;
+  pdfz::RectF resizedBounds() const;  // the selected comment's rect as the handle's drag has it
+  // Its point handles (display points): a line's or an arrow's two ends, a callout's tip and
+  // knee. Empty for other kinds.
+  std::vector<pdfz::PointF> pointHandles(const pdfz::Annotation& a) const;
+  int pointHandleUnder(QPointF viewportPos) const;  // the index in pointHandles(), or -1
+  // A drag that changes the selected comment's shape (a point handle, a callout's box moved
+  // or resized): the comment as the drag has it, and whether one is going on.
+  bool reshaping() const;
+  pdfz::Annotation reshaped() const;
+  // A line's or an arrow's other end while drawing it: on 45 degrees with Shift.
+  QPointF createEnd() const;
+  // A comment drawn as it will be (lines, the box and leader of a callout), over the page.
+  void paintGhost(QPainter& p, int page, const pdfz::Annotation& a, double opacity = 0.6) const;
   void placeMark(int page, QPointF point);  // a check mark, cross or dot, centered there
   void placeDate(int page, QPointF point);
   void finishCreate();
@@ -328,13 +346,15 @@ private:
   int selPage_ = -1;   // the selected annotation
   int selIndex_ = -1;
   // A drag in progress on page dragPage_, in its display points.
-  enum class Drag { None, MoveAnnot, ResizeAnnot, Create, MoveContent, ResizeContent, RotateContent, MarqueeContent, WidenEditor };
+  enum class Drag { None, MoveAnnot, ResizeAnnot, MoveHandle, Create, MoveContent, ResizeContent, RotateContent, MarqueeContent, WidenEditor };
   Drag drag_ = Drag::None;
   int dragPage_ = -1;
   QPointF dragStart_;
   QPointF dragNow_;
   bool dragMoved_ = false;
-  int resizeCorner_ = -1;
+  int resizeCorner_ = -1;  // the handle dragged (ResizeAnnot, MoveHandle, WidenEditor)
+  bool moveCalloutBox_ = false;  // MoveAnnot of a callout by its box: the tip stays where it is
+  bool snapShift_ = false;       // Shift held while dragging: lines on 45 degrees
   std::vector<pdfz::PointF> inkPoints_;
   TextPos anchor_;
   TextPos focus_;
