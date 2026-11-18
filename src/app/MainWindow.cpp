@@ -71,6 +71,12 @@
 #include <set>
 
 namespace {
+// The toolbars' layout saved with the window: 1 since the second row holds the comment, Edit
+// PDF and Fill & Sign tools (Fill & Sign was on the first row).
+constexpr int kWindowStateVersion = 1;
+}  // namespace
+
+namespace {
 
 constexpr int kMaxRecent = 10;
 // What connectTab adds to a tab's widgets for this window (taken off again when the tab moves
@@ -240,9 +246,11 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
 
   QSettings s;
   if (!restoreGeometry(s.value("window/geometry").toByteArray())) resize(1200, 860);
-  restoreState(s.value("window/state").toByteArray());
+  // A state saved with the toolbars in their old rows (version 0) isn't used: they'd go back
+  // there.
+  const bool restored = restoreState(s.value("window/state").toByteArray(), kWindowStateVersion);
   showSidePanel(thumbsDock_->isHidden() ? -1 : std::clamp(s.value("window/sidePanel", 0).toInt(), 0, 3));
-  if (!s.contains("window/state")) commentsDock_->hide();  // shown when wanted (View > Comments)
+  if (!restored) commentsDock_->hide();  // shown when wanted (View > Comments)
   editBar_->hide();  // until Edit PDF is picked
 
   onCurrentTabChanged();
@@ -1156,8 +1164,8 @@ void MainWindow::createToolBars() {
   tb->addSeparator();
   tb->addAction(findAct_);
 
-  // Fill & Sign, beside the main tools.
-  fillBar_ = addToolBar(tr("Fill && Sign"));
+  // Fill & Sign: on the second row, after the comment tools (or Edit PDF's), added below.
+  fillBar_ = new QToolBar(tr("Fill && Sign"), this);
   fillBar_->setObjectName("fillSignToolBar");
   fillBar_->setMovable(false);
   for (int i = kCommentToolCount; i < kMarkupToolCount; ++i) fillBar_->addAction(markupActs_[std::size_t(i)]);
@@ -1175,7 +1183,8 @@ void MainWindow::createToolBars() {
   for (QAction* a : {smallerAct_, largerAct_})
     if (QWidget* w = fillBar_->widgetForAction(a)) w->setFocusPolicy(Qt::NoFocus);
 
-  // The comment tools, on their own row.
+  // The second row: the comment tools (Edit PDF's in their place while it's in use), then
+  // Fill & Sign. The first row ends with Find.
   addToolBarBreak();
   markupBar_ = addToolBar(tr("Comment Tools"));
   markupBar_->setObjectName("commentToolBar");
@@ -1266,8 +1275,7 @@ void MainWindow::createToolBars() {
     textControls_.push_back(a);
   }
 
-  // Edit PDF's tools, on their own row while it's in use.
-  addToolBarBreak();
+  // Edit PDF's tools, in the comment tools' place while it's in use.
   editBar_ = addToolBar(tr("Edit PDF"));
   editBar_->setObjectName("editPdfToolBar");
   editBar_->setMovable(false);
@@ -1365,6 +1373,7 @@ void MainWindow::createToolBars() {
   arrangeButton->setFocusPolicy(Qt::NoFocus);
   editBar_->addWidget(arrangeButton);
   editBar_->hide();
+  addToolBar(fillBar_);  // after both
 
   // In the View menu, under the panels.
   QAction* toggle = markupBar_->toggleViewAction();
@@ -1618,7 +1627,7 @@ void MainWindow::closeEvent(QCloseEvent* e) {
     editBar_->hide();
     markupBar_->setVisible(commentBarWasShown_);
   }
-  s.setValue("window/state", saveState());
+  s.setValue("window/state", saveState(kWindowStateVersion));
   e->accept();
 }
 
