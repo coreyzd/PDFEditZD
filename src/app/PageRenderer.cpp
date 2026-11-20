@@ -13,7 +13,7 @@
 namespace {
 
 // Cache budgets, in KiB (QCache costs).
-constexpr int kTileCacheKiB = 256 * 1024;
+constexpr int kTileCacheKiB = PageRenderer::kTileBudget * PageRenderer::kTileSize * PageRenderer::kTileSize * 4 / 1024;
 constexpr int kPreviewCacheKiB = 96 * 1024;
 
 int costKiB(const QImage& img) { return std::max(1, int(img.sizeInBytes() / 1024)); }
@@ -67,8 +67,55 @@ void PageRenderer::invalidatePage(int page) {
     q->erase(std::remove_if(q->begin(), q->end(), [&](const Job& j) { return j.page == page; }), q->end());
 }
 
+const PageRenderer::Cached* PageRenderer::TileCache::get(const TileKey& key) const {
+  const auto it = entries_.constFind(key);
+  if (it == entries_.cend()) return nullptr;
+  order_.splice(order_.begin(), order_, it->pos);  // to the front: just used
+  return &it->value;
+}
+
+const PageRenderer::Cached* PageRenderer::TileCache::peek(const TileKey& key) const {
+  const auto it = entries_.constFind(key);
+  return it == entries_.cend() ? nullptr : &it->value;
+}
+
+void PageRenderer::TileCache::insert(const TileKey& key, Cached value, qsizetype cost) {
+  if (const auto it = entries_.find(key); it != entries_.end()) {  // a newer rendering of it
+    total_ -= it->cost;
+    order_.erase(it->pos);
+    entries_.erase(it);
+  }
+  order_.push_front(key);
+  entries_.insert(key, Entry{std::move(value), cost, order_.begin()});
+  total_ += cost;
+  while (total_ > max_ && order_.size() > 1) {
+    // The least recently used tile at another zoom; failing that, at this one (never the new
+    // one, at the front).
+    auto victim = std::prev(order_.end());
+    for (auto it = victim;; --it) {
+      if (it->scaleKey != key.scaleKey) {
+        victim = it;
+        break;
+      }
+      if (it == std::next(order_.begin())) break;
+    }
+    const auto e = entries_.find(*victim);
+    total_ -= e->cost;
+    entries_.erase(e);
+    order_.erase(victim);
+  }
+}
+
+void PageRenderer::TileCache::clear() {
+  entries_.clear();
+  order_.clear();
+  total_ = 0;
+}
+
+std::vector<TileKey> PageRenderer::TileCache::keys() const { return {order_.begin(), order_.end()}; }
+
 QImage PageRenderer::tile(const TileKey& key, bool* fresh) const {
-  const Cached* c = tiles_.object(key);
+  const Cached* c = tiles_.get(key);
   if (fresh) *fresh = c && c->epoch == epochOf(key.page);
   return c ? c->image : QImage();
 }
@@ -83,7 +130,7 @@ std::vector<std::pair<TileKey, QImage>> PageRenderer::otherTiles(int page, int s
   std::vector<std::pair<TileKey, QImage>> out;
   for (const TileKey& k : tiles_.keys())
     if (k.page == page && k.scaleKey != scaleKey)
-      if (const Cached* c = tiles_.object(k)) out.emplace_back(k, c->image);
+      if (const Cached* c = tiles_.peek(k)) out.emplace_back(k, c->image);  // not marked used
   return out;
 }
 
@@ -168,7 +215,7 @@ void PageRenderer::deliver(quint64 serial, const Job& job, QImage image) {
   if (serial != serial_) return;  // rendered for a document (or page order) that's gone
   if (job.epoch != epochOf(job.page)) return;  // the page has changed since
   if (job.isTile) {
-    tiles_.insert(job.key, new Cached{image, job.epoch}, costKiB(image));
+    tiles_.insert(job.key, Cached{image, job.epoch}, costKiB(image));
     emit tileReady(job.key);
   } else {
     previews_.insert(job.page, new Cached{image, job.epoch}, costKiB(image));

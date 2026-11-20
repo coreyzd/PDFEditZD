@@ -12,6 +12,7 @@
 
 #include <condition_variable>
 #include <deque>
+#include <list>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -38,6 +39,9 @@ class PageRenderer : public QObject {
 public:
   static constexpr int kTileSize = 512;     // device pixels
   static constexpr int kPreviewBox = 320;   // previews fit in this many device pixels square
+  // How many whole tiles the cache holds: the view asks for fewer than this at once, so the
+  // tiles it wants never push each other out.
+  static constexpr int kTileBudget = 256;
 
   explicit PageRenderer(QObject* parent = nullptr);
   ~PageRenderer() override;
@@ -94,7 +98,32 @@ private:
     QImage image;
     quint64 epoch = 0;  // the page's epoch it was rendered at
   };
-  QCache<TileKey, Cached> tiles_;
+  // The tiles kept, up to a cost (KiB). When it's full, what's gone longest unused goes first,
+  // but tiles at other zooms always before those at the zoom of the tile coming in: the old
+  // zooms' tiles are only drawn while the new ones arrive, and must never push out tiles the
+  // view needs. (With QCache, drawing them marked them used on every repaint, so at a high
+  // zoom the view's tiles pushed each other out and were drawn again and again: a processor
+  // kept busy for nothing.)
+  class TileCache {
+  public:
+    explicit TileCache(qsizetype maxCost) : max_(maxCost) {}
+    const Cached* get(const TileKey& key) const;   // and marks it used
+    const Cached* peek(const TileKey& key) const;  // without
+    void insert(const TileKey& key, Cached value, qsizetype cost);
+    void clear();
+    std::vector<TileKey> keys() const;
+
+  private:
+    struct Entry {
+      Cached value;
+      qsizetype cost = 0;
+      std::list<TileKey>::iterator pos;
+    };
+    mutable std::list<TileKey> order_;  // most recently used first
+    QHash<TileKey, Entry> entries_;
+    qsizetype total_ = 0, max_;
+  };
+  TileCache tiles_;
   QCache<int, Cached> previews_;
   QHash<int, quint64> pageEpochs_;  // bumped by invalidatePage(); UI thread only
 

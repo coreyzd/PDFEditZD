@@ -443,6 +443,10 @@ void DocumentView::sendRequests() {
 
   std::vector<int> previews;
   std::vector<TileKey> tiles;
+  // What's on screen comes first; what's just off it only while the cache has room for all of
+  // it (a huge screen at a high zoom).
+  int wanted = 0;
+  const int maxWanted = PageRenderer::kTileBudget * 3 / 4;
   auto addRegion = [&](const QRectF& region, bool withPreviews) {
     const int first = pageAt(region.top());
     const int last = pageAt(region.bottom());
@@ -464,6 +468,7 @@ void DocumentView::sendRequests() {
       const int ty1 = std::min((pageDevH - 1) / T, int((part.bottom() - r.top()) * devPerLogical) / T);
       for (int ty = ty0; ty <= ty1; ++ty)
         for (int tx = tx0; tx <= tx1; ++tx) {
+          if (++wanted > maxWanted && region != vis) return;
           const TileKey key{i, scaleKey, tx, ty};
           bool fresh = false;
           renderer_->tile(key, &fresh);
