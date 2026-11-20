@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include "PageRenderer.hpp"
 
+#include "ActivityMonitor.hpp"
 #include "ImageUtil.hpp"
 
+#include <QElapsedTimer>
 #include <QMetaObject>
 
 #include <algorithm>
@@ -130,6 +132,8 @@ void PageRenderer::run() {
     }
 
     QImage image;
+    QElapsedTimer took;
+    took.start();
     if (doc && job.page >= 0 && job.page < doc->pageCount()) {
       if (job.isTile) {
         const double scale = job.key.scale();
@@ -146,6 +150,8 @@ void PageRenderer::run() {
       }
     }
 
+    (job.isTile ? ActivityMonitor::tilesRendered : ActivityMonitor::previewsRendered)++;
+    ActivityMonitor::renderMicroseconds += long(took.nsecsElapsed() / 1000);
     {
       std::lock_guard lock(mutex_);
       current_.reset();

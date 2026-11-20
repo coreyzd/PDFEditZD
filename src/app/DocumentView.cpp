@@ -1029,7 +1029,9 @@ void DocumentView::markupSelection(MarkupTool tool, const MarkupStyle& style) {
 }
 
 void DocumentView::autoScrollStep() {
-  if (!selecting_) {
+  // The button let go without the view hearing of it (another window took the mouse): over.
+  if (!selecting_ || !(QGuiApplication::mouseButtons() & Qt::LeftButton)) {
+    selecting_ = false;
     autoScroll_.stop();
     return;
   }

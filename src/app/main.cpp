@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
+#include "ActivityMonitor.hpp"
 #include "MainWindow.hpp"
 #include "SingleInstance.hpp"
 
@@ -94,6 +95,8 @@ int main(int argc, char** argv) {
   if (single.handOff(files)) return 0;
 
   QApplication::setWindowIcon(appIcon());
+  // Working hard with nobody using it: what it was doing goes in the log.
+  ActivityMonitor monitor;
   // PDFium runs for as long as the app; the windows (and every document) close before it stops.
   pdfz::Engine engine;
   int rc = 0;
