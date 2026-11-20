@@ -7,6 +7,7 @@
 #include "ImageUtil.hpp"
 #include "OfficeImport.hpp"
 #include "PageRenderer.hpp"
+#include "PageOrganizer.hpp"
 #include "ThumbnailPanel.hpp"
 
 #include "core/annotations.hpp"
@@ -22,7 +23,7 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QMessageBox>
-#include <QVBoxLayout>
+#include <QStackedLayout>
 
 #include <algorithm>
 #include <cstring>
@@ -32,9 +33,11 @@ DocumentTab::DocumentTab(QWidget* parent) : QWidget(parent) {
   renderer_ = new PageRenderer(this);
   search_ = new TextSearch(this);
   view_ = new DocumentView(renderer_, &textCache_, search_, &annots_, &fields_, &content_, this);
-  auto* lay = new QVBoxLayout(this);
-  lay->setContentsMargins(0, 0, 0, 0);
-  lay->addWidget(view_);
+  organizer_ = new PageOrganizer(renderer_, this);
+  stack_ = new QStackedLayout(this);
+  stack_->setContentsMargins(0, 0, 0, 0);
+  stack_->addWidget(view_);
+  stack_->addWidget(organizer_);
   // Not in this widget's layout: the main window puts them in its side panels.
   thumbs_ = new ThumbnailPanel(renderer_, nullptr);
   comments_ = new CommentsPanel(nullptr);
@@ -74,6 +77,7 @@ DocumentTab::~DocumentTab() {
   // goes when this widget does.
   delete thumbs_;
   delete comments_;
+  delete organizer_;
   delete view_;
 }
 
@@ -94,9 +98,29 @@ void DocumentTab::setDocument(std::shared_ptr<pdfz::Document> doc, const QString
   view_->clearContentSelection();
   renderer_->setDocument(doc_);
   thumbs_->documentChanged();
+  organizer_->grid()->documentChanged();
   comments_->setDocument(doc_);
   view_->documentChanged(false);
   emit stateChanged();
+}
+
+bool DocumentTab::isOrganizing() const { return stack_->currentWidget() == organizer_; }
+
+void DocumentTab::setOrganizing(bool on) {
+  if (on == isOrganizing() || !doc_) return;
+  if (on) {
+    finishTextEditing();
+    view_->commitContentEdit();
+    stack_->setCurrentWidget(organizer_);  // first: laid out at its size
+    organizer_->grid()->documentChanged();
+    organizer_->grid()->setCurrentPage(view_->currentPage());
+    organizer_->grid()->setFocus();
+  } else {
+    const int page = organizer_->grid()->currentPage();
+    stack_->setCurrentWidget(view_);
+    if (page != view_->currentPage()) view_->goToPage(page);
+    view_->setFocus();
+  }
 }
 
 bool DocumentTab::saveTo(const QString& path) {
@@ -146,6 +170,7 @@ void DocumentTab::refresh(Scope scope, int page, int pageToShow, bool keepView) 
       renderer_->invalidatePage(p);
       thumbs_->pageChanged(p);
     }
+    organizer_->grid()->pagesChanged();
     view_->fieldsChanged();
     emit stateChanged();
     emit contentChanged(false);
@@ -157,6 +182,7 @@ void DocumentTab::refresh(Scope scope, int page, int pageToShow, bool keepView) 
     search_->clear();
     renderer_->invalidatePage(page);
     thumbs_->pageChanged(page);
+    organizer_->grid()->pagesChanged();
     view_->contentChanged(page);
     emit stateChanged();
     emit contentChanged(true);
@@ -166,6 +192,7 @@ void DocumentTab::refresh(Scope scope, int page, int pageToShow, bool keepView) 
     annots_.invalidate(page);
     renderer_->invalidatePage(page);
     thumbs_->pageChanged(page);
+    organizer_->grid()->pagesChanged();
     view_->annotationsChanged(page);
     comments_->refreshPage(page);
     emit stateChanged();
@@ -181,6 +208,7 @@ void DocumentTab::refresh(Scope scope, int page, int pageToShow, bool keepView) 
   content_.setDocument(doc_);
   renderer_->invalidate();
   thumbs_->documentChanged();
+  organizer_->grid()->documentChanged();
   comments_->setDocument(doc_);
   view_->documentChanged(true);
   const int show = std::clamp(pageToShow, 0, doc_->pageCount() - 1);

@@ -100,9 +100,19 @@ private:
   // Pages
   void movePages(DocumentTab* t, const std::vector<int>& pages, int insertBefore);
   void deletePages();
-  void insertBlankPage();
-  void insertPagesFromFile();
+  void deletePageList(DocumentTab* t, const std::vector<int>& pages);
+  // At page index `at` (-1: after the selected pages when organizing, else after the current
+  // page).
+  void insertBlankPage(int at = -1);
+  void insertPagesFromFile(int at = -1);
   void rotatePages(int degrees);
+  void rotatePageList(DocumentTab* t, const std::vector<int>& pages, int degrees);
+  // The pages the Pages commands work on: Organize Pages' selection while it's showing, else
+  // the thumbnails'.
+  std::vector<int> selectedPages(DocumentTab* t) const;
+  void selectPagesAfterEdit(DocumentTab* t, int first, int count);
+  int insertionPoint(DocumentTab* t) const;
+  void setOrganizing(bool on);
   void extractPages();
   void splitDocument();
 
@@ -191,6 +201,8 @@ private:
   QAction* findPrevAct_;
   QAction* authorAct_;
   QAction* deletePagesAct_;
+  QAction* organizeAct_;        // Pages > Organize Pages (checked while it shows)
+  QAction* organizeCloseAct_;   // its Close
   QAction* insertBlankAct_;
   QAction* extractAct_;
   QAction* splitAct_;

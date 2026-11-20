@@ -10,6 +10,7 @@ add_executable(pdfeditzd
   MainWindow.cpp
   DocumentView.cpp
   PageRenderer.cpp
+  PageOrganizer.cpp
   ActivityMonitor.cpp
   ThumbnailPanel.cpp
   Printing.cpp

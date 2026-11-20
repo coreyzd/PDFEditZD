@@ -28,6 +28,8 @@ QIcon fillColorIcon(const QColor& color, const QPalette& palette);
 QIcon textColorIcon(const QColor& color, const QPalette& palette);
 QIcon alignIcon(int align, const QPalette& palette);  // 0 left, 1 center, 2 right, 3 justified
 QIcon rotateIcon(bool clockwise, const QPalette& palette);
+QIcon trashIcon(const QPalette& palette);          // a waste basket
+QIcon organizePagesIcon(const QPalette& palette);  // four pages in a grid
 QIcon flipIcon(bool horizontal, const QPalette& palette);  // left to right, or top to bottom
 QIcon sizeIcon(bool larger, const QPalette& palette);
 QIcon fitWidthIcon(const QPalette& palette);

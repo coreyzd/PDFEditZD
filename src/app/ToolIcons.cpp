@@ -376,6 +376,35 @@ QIcon rotateIcon(bool clockwise, const QPalette& palette) {
   });
 }
 
+QIcon trashIcon(const QPalette& palette) {
+  return drawnIcon(palette, 20, [&](QPainter& p, const QColor& ink, bool) {
+    p.setPen(QPen(ink, 1.5, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    p.setBrush(Qt::NoBrush);
+    p.drawLine(QPointF(3.5, 5), QPointF(16.5, 5));        // the lid
+    p.drawLine(QPointF(8, 5), QPointF(8.5, 2.75));
+    p.drawLine(QPointF(8.5, 2.75), QPointF(11.5, 2.75));  // its handle
+    p.drawLine(QPointF(11.5, 2.75), QPointF(12, 5));
+    QPainterPath can;
+    can.moveTo(5, 5);
+    can.lineTo(6, 17.5);
+    can.lineTo(14, 17.5);
+    can.lineTo(15, 5);
+    p.drawPath(can);
+    p.drawLine(QPointF(8.5, 8), QPointF(8.75, 14.5));
+    p.drawLine(QPointF(11.5, 8), QPointF(11.25, 14.5));
+  });
+}
+
+QIcon organizePagesIcon(const QPalette& palette) {
+  return drawnIcon(palette, 20, [&](QPainter& p, const QColor& ink, bool) {
+    // Four pages in a grid.
+    p.setPen(QPen(ink, 1.3, Qt::SolidLine, Qt::SquareCap, Qt::MiterJoin));
+    p.setBrush(Qt::NoBrush);
+    for (int r = 0; r < 2; ++r)
+      for (int c = 0; c < 2; ++c) p.drawRect(QRectF(2.5 + c * 8.5, 1.5 + r * 9, 6, 8));
+  });
+}
+
 QIcon flipIcon(bool horizontal, const QPalette& palette) {
   return drawnIcon(palette, 20, [&](QPainter& p, const QColor& ink, bool) {
     if (!horizontal) {  // the same, turned a quarter

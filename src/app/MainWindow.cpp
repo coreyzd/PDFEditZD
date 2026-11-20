@@ -6,6 +6,7 @@
 #include "DocumentTabs.hpp"
 #include "FindBar.hpp"
 #include "OfficeImport.hpp"
+#include "PageOrganizer.hpp"
 #include "Printing.hpp"
 #include "SidePanels.hpp"
 #include "SignatureDialog.hpp"
@@ -413,6 +414,55 @@ void MainWindow::connectTab(DocumentTab* t) {
   del->setObjectName(kWindowShortcut);
   connect(del, &QShortcut::activated, this, &MainWindow::deletePages);
 
+  // Organize Pages: its toolbar, and what its grid asks for.
+  PageOrganizer* org = t->organizer();
+  QToolBar* bar = org->newBar();
+  for (QAction* a : {rotateCcwAct_, rotateCwAct_, deletePagesAct_}) {
+    auto* b = new QToolButton(bar);
+    b->setDefaultAction(a);
+    b->setToolButtonStyle(Qt::ToolButtonIconOnly);
+    b->setFocusPolicy(Qt::NoFocus);
+    bar->addWidget(b);
+  }
+  bar->addSeparator();
+  auto* insert = new QToolButton(bar);
+  insert->setText(tr("Insert"));
+  insert->setToolTip(tr("Insert pages after the selected ones"));
+  insert->setPopupMode(QToolButton::InstantPopup);
+  insert->setFocusPolicy(Qt::NoFocus);
+  auto* insertMenu = new QMenu(insert);
+  insertMenu->addAction(insertFileAct_);
+  insertMenu->addAction(insertBlankAct_);
+  insert->setMenu(insertMenu);
+  bar->addWidget(insert);
+  for (QAction* a : {extractAct_, splitAct_}) {
+    bar->addAction(a);
+    if (QWidget* w = bar->widgetForAction(a)) w->setFocusPolicy(Qt::NoFocus);
+  }
+  org->finishBar(organizeCloseAct_);
+  PageGrid* grid = org->grid();
+  connect(grid, &PageGrid::rotateRequested, this,
+          [this, t](const std::vector<int>& pages, int degrees) { rotatePageList(t, pages, degrees); });
+  connect(grid, &PageGrid::deleteRequested, this, [this, t](const std::vector<int>& pages) { deletePageList(t, pages); });
+  connect(grid, &PageGrid::pagesMoved, this,
+          [this, t](const std::vector<int>& pages, int before) { movePages(t, pages, before); });
+  connect(grid, &PageGrid::insertRequested, this, [this, t](int before, const QPoint& pos) {
+    if (t != tab()) return;
+    QMenu menu(this);
+    menu.addAction(tr("Insert Pages from &File…"), this, [this, before] { insertPagesFromFile(before); });
+    menu.addAction(tr("Insert &Blank Page"), this, [this, before] { insertBlankPage(before); });
+    menu.exec(pos);
+  });
+  connect(grid, &PageGrid::pageOpened, this, [this, t](int page) {
+    if (t != tab()) return;
+    t->organizer()->grid()->setCurrentPage(page);
+    organizeAct_->setChecked(false);  // to the page view, at that page
+  });
+  connect(grid, &PageGrid::contextMenuRequested, this, [this](const QPoint& pos) { pagesMenu_->exec(pos); });
+  connect(grid, &PageGrid::selectionChanged, this, [this, t] {  // the page box follows
+    if (t == tab() && t->isOrganizing()) onCurrentPageChanged(t->organizer()->grid()->currentPage());
+  });
+
   TextSearch* s = t->search();
   connect(s, &TextSearch::matchesChanged, this, [this, t] { onSearchMatches(t, false); });
   connect(s, &TextSearch::finished, this, [this, t] { onSearchMatches(t, true); });
@@ -462,7 +512,7 @@ void MainWindow::releaseTab(DocumentTab* t) {
   if (i < 0) return;
   t->finishTextEditing();
   DocumentView* v = t->view();
-  for (QObject* o : std::initializer_list<QObject*>{t, v, t->thumbnails(), t->comments(), t->search()})
+  for (QObject* o : std::initializer_list<QObject*>{t, v, t->thumbnails(), t->comments(), t->search(), t->organizer()->grid()})
     disconnect(o, nullptr, this, nullptr);
   for (QWidget* w : std::initializer_list<QWidget*>{v, t->thumbnails()})
     for (QShortcut* sc : w->findChildren<QShortcut*>(kWindowShortcut, Qt::FindDirectChildrenOnly)) delete sc;
@@ -823,7 +873,9 @@ void MainWindow::createActions() {
   strikeSelAct_->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_X));
   connect(strikeSelAct_, &QAction::triggered, this, [this] { markupSelection(MarkupTool::StrikeOut); });
 
-  deletePagesAct_ = new QAction(themeIcon("edit-delete"), tr("&Delete Pages"), this);
+  // Drawn icons where the icon theme has none (Organize Pages shows these three as icons).
+  auto orDrawn = [](QIcon icon, const QIcon& drawn) { return icon.isNull() || icon.availableSizes().isEmpty() ? drawn : icon; };
+  deletePagesAct_ = new QAction(orDrawn(themeIcon("edit-delete"), trashIcon(palette())), tr("&Delete Pages"), this);
   deletePagesAct_->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_D));
   connect(deletePagesAct_, &QAction::triggered, this, &MainWindow::deletePages);
   extractAct_ = new QAction(tr("&Extract Pages…"), this);
@@ -833,13 +885,21 @@ void MainWindow::createActions() {
   splitAct_->setToolTip(tr("Save the document as several PDFs of so many pages each"));
   connect(splitAct_, &QAction::triggered, this, &MainWindow::splitDocument);
   insertBlankAct_ = new QAction(tr("Insert &Blank Page"), this);
-  connect(insertBlankAct_, &QAction::triggered, this, &MainWindow::insertBlankPage);
+  connect(insertBlankAct_, &QAction::triggered, this, [this] { insertBlankPage(); });
   insertFileAct_ = new QAction(tr("Insert Pages from &File…"), this);
-  connect(insertFileAct_, &QAction::triggered, this, &MainWindow::insertPagesFromFile);
-  rotateCwAct_ = new QAction(themeIcon("object-rotate-right"), tr("Rotate &Clockwise"), this);
+  connect(insertFileAct_, &QAction::triggered, this, [this] { insertPagesFromFile(); });
+  organizeAct_ = new QAction(organizePagesIcon(palette()), tr("&Organize Pages"), this);
+  organizeAct_->setCheckable(true);
+  organizeAct_->setToolTip(tr("Organize Pages: turn, delete, insert and reorder pages in a grid of thumbnails"));
+  connect(organizeAct_, &QAction::toggled, this, &MainWindow::setOrganizing);
+  organizeCloseAct_ = new QAction(tr("Close"), this);
+  organizeCloseAct_->setToolTip(tr("Back to the pages"));
+  connect(organizeCloseAct_, &QAction::triggered, this, [this] { organizeAct_->setChecked(false); });
+  rotateCwAct_ = new QAction(orDrawn(themeIcon("object-rotate-right"), rotateIcon(true, palette())), tr("Rotate &Clockwise"), this);
   rotateCwAct_->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_R));
   connect(rotateCwAct_, &QAction::triggered, this, [this] { rotatePages(90); });
-  rotateCcwAct_ = new QAction(themeIcon("object-rotate-left"), tr("Rotate Counterclock&wise"), this);
+  rotateCcwAct_ = new QAction(orDrawn(themeIcon("object-rotate-left"), rotateIcon(false, palette())),
+                              tr("Rotate Counterclock&wise"), this);
   rotateCcwAct_->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_L));
   connect(rotateCcwAct_, &QAction::triggered, this, [this] { rotatePages(-90); });
 
@@ -963,6 +1023,8 @@ void MainWindow::createMenus() {
   fill->addAction(saveFlatAct_);
 
   pagesMenu_ = menuBar()->addMenu(tr("&Pages"));
+  pagesMenu_->addAction(organizeAct_);
+  pagesMenu_->addSeparator();
   pagesMenu_->addAction(insertBlankAct_);
   pagesMenu_->addAction(insertFileAct_);
   pagesMenu_->addSeparator();
@@ -1141,7 +1203,8 @@ void MainWindow::createToolBars() {
   pageSpin_->setMinimumWidth(56);
   connect(pageSpin_, &QSpinBox::valueChanged, this, [this](int v) {
     auto* t = tab();
-    if (t && v - 1 != t->view()->currentPage()) t->view()->goToPage(v - 1);
+    if (t && t->isOrganizing()) t->organizer()->grid()->setCurrentPage(v - 1);
+    else if (t && v - 1 != t->view()->currentPage()) t->view()->goToPage(v - 1);
   });
   tb->addWidget(pageSpin_);
   pageCountLabel_ = new QLabel(this);
@@ -1440,7 +1503,22 @@ void MainWindow::updateUi() {
   for (QAction* a : markupActs_) a->setEnabled(has);
   signAct_->setEnabled(has);
   stampAct_->setEnabled(has);
-  for (QAction* a : {editAct_, addTextAct_, addImageAct_}) a->setEnabled(has);
+  // Organize Pages shows the pages in a grid: the tools for the page view wait meanwhile.
+  const bool organizing = has && t->isOrganizing();
+  {
+    const QSignalBlocker block(organizeAct_);
+    organizeAct_->setChecked(organizing);
+  }
+  organizeAct_->setEnabled(has);
+  for (QAction* a : markupActs_) a->setEnabled(has && !organizing);
+  signAct_->setEnabled(has && !organizing);
+  stampAct_->setEnabled(has && !organizing);
+  for (QAction* a : {editAct_, addTextAct_, addImageAct_}) a->setEnabled(has && !organizing);
+  for (QToolBar* b : {markupBar_, fillBar_, editBar_}) b->setEnabled(!organizing);
+  for (QAction* a : {actualSizeAct_, fitPageAct_, fitWidthAct_, zoomInAct_, zoomOutAct_, findAct_, findNextAct_,
+                     findPrevAct_})
+    a->setEnabled(has && !organizing);
+  zoomCombo_->setEnabled(has && !organizing);
   updateClipboardActions();
   extractAct_->setEnabled(has);
   splitAct_->setEnabled(has && t->document()->pageCount() > 1);
@@ -1460,7 +1538,6 @@ void MainWindow::updateUi() {
   undoAct_->setIconText(tr("Undo"));  // the toolbar keeps it short; the menu says what
   redoAct_->setIconText(tr("Redo"));
   pageSpin_->setEnabled(has);
-  zoomCombo_->setEnabled(has);
   if (has) {
     const int n = t->document()->pageCount();
     {
@@ -1735,7 +1812,7 @@ void MainWindow::movePages(DocumentTab* t, const std::vector<int>& pages, int in
   if (unchanged) return;
   if (t->applyEdit(n == 1 ? tr("Move Page") : tr("Move Pages"), dest, DocumentTab::Scope::Pages,
                    [&](pdfz::Document& d) { return d.movePages(pages, dest); })) {
-    t->thumbnails()->selectPages(dest, n);
+    selectPagesAfterEdit(t, dest, n);
     statusBar()->showMessage(tr("Moved %1").arg(n == 1 ? tr("page %1").arg(pages[0] + 1)
                                                        : tr("pages %1").arg(describePages(pages))), 3000);
   }
@@ -1744,38 +1821,80 @@ void MainWindow::movePages(DocumentTab* t, const std::vector<int>& pages, int in
 void MainWindow::deletePages() {
   DocumentTab* t = tab();
   if (!t || !t->hasDocument()) return;
-  const std::vector<int> pages = t->thumbnails()->selectedPages();
-  if (pages.empty()) return;
+  deletePageList(t, selectedPages(t));
+}
+
+std::vector<int> MainWindow::selectedPages(DocumentTab* t) const {
+  if (!t || !t->hasDocument()) return {};
+  return t->isOrganizing() ? t->organizer()->grid()->selectedPages() : t->thumbnails()->selectedPages();
+}
+
+void MainWindow::selectPagesAfterEdit(DocumentTab* t, int first, int count) {
+  t->thumbnails()->selectPages(first, count);
+  t->organizer()->grid()->selectPages(first, count);
+}
+
+int MainWindow::insertionPoint(DocumentTab* t) const {
+  if (t->isOrganizing()) {
+    const std::vector<int> sel = t->organizer()->grid()->selectedPages();
+    return sel.empty() ? t->document()->pageCount() : sel.back() + 1;
+  }
+  return t->view()->currentPage() + 1;
+}
+
+void MainWindow::setOrganizing(bool on) {
+  DocumentTab* t = tab();
+  if (!t || !t->hasDocument()) {
+    if (on) {
+      const QSignalBlocker block(organizeAct_);
+      organizeAct_->setChecked(false);
+    }
+    return;
+  }
+  if (on && editAct_->isChecked()) selectToolAct_->trigger();  // out of Edit PDF first
+  t->setOrganizing(on);
+  updateUi();
+}
+
+void MainWindow::deletePageList(DocumentTab* t, const std::vector<int>& pages) {
+  if (!t || !t->hasDocument() || pages.empty()) return;
   if (int(pages.size()) >= t->document()->pageCount()) {
     QMessageBox::information(this, tr("Delete Pages"), tr("A PDF needs at least one page, so not every page can be deleted."));
     return;
   }
   const QString which = pages.size() == 1 ? tr("page %1").arg(pages[0] + 1) : tr("pages %1").arg(describePages(pages));
   if (t->applyEdit(pages.size() == 1 ? tr("Delete Page") : tr("Delete Pages"), pages.front(), DocumentTab::Scope::Pages,
-                   [&](pdfz::Document& d) { return d.deletePages(pages); }))
+                   [&](pdfz::Document& d) { return d.deletePages(pages); })) {
+    // The page after them (or the last) is selected next, ready for another.
+    selectPagesAfterEdit(t, std::min(pages.front(), t->document()->pageCount() - 1), 1);
     statusBar()->showMessage(tr("Deleted %1 (Ctrl+Z to undo)").arg(which), 4000);
+  }
 }
 
-void MainWindow::insertBlankPage() {
+void MainWindow::insertBlankPage(int at) {
   DocumentTab* t = tab();
   if (!t || !t->hasDocument()) return;
-  const int cur = t->view()->currentPage();
-  const int at = cur + 1;
-  // The same size as the page it follows, like Acrobat.
-  pdfz::SizeF size = t->document()->pageSize(cur);
-  const int rot = t->document()->pageRotation(cur);
+  if (at < 0) at = insertionPoint(t);
+  at = std::clamp(at, 0, t->document()->pageCount());
+  // The same size as the page it follows (or, at the start, the one it goes before), like
+  // Acrobat.
+  const int like = std::clamp(at - 1, 0, t->document()->pageCount() - 1);
+  pdfz::SizeF size = t->document()->pageSize(like);
+  const int rot = t->document()->pageRotation(like);
   if (rot == 90 || rot == 270) std::swap(size.width, size.height);  // a new page isn't rotated
   if (size.width <= 0) size = pdfz::kLetter;
-  t->applyEdit(tr("Insert Blank Page"), at, DocumentTab::Scope::Pages,
-               [&](pdfz::Document& d) { return d.insertBlankPage(at, size); });
+  if (t->applyEdit(tr("Insert Blank Page"), at, DocumentTab::Scope::Pages,
+                   [&](pdfz::Document& d) { return d.insertBlankPage(at, size); }))
+    selectPagesAfterEdit(t, at, 1);
 }
 
 // PDFs, Word documents (converted by Word) and pictures (a page each, the size of the page
 // they go after), several at once, in the order chosen, after the current page.
-void MainWindow::insertPagesFromFile() {
+void MainWindow::insertPagesFromFile(int startAt) {
   DocumentTab* t = tab();
   if (!t || !t->hasDocument()) return;
   t->finishTextEditing();
+  if (startAt < 0) startAt = insertionPoint(t);
   const QString all = (QStringList{"*.pdf"} + wordPatterns() + imagePatterns()).join(' ');
   const QString filter = tr("PDFs, Word documents and pictures (%1);;PDF documents (*.pdf);;Word documents (%2);;"
                             "Pictures (%3);;All files (*)")
@@ -1784,7 +1903,7 @@ void MainWindow::insertPagesFromFile() {
   if (paths.isEmpty()) return;
   rememberDir(paths.front());
 
-  const int start = t->view()->currentPage() + 1;
+  const int start = std::clamp(startAt, 0, t->document()->pageCount());
   int at = start;
   int inserted = 0;
   QStringList failed;
@@ -1835,7 +1954,10 @@ void MainWindow::insertPagesFromFile() {
       failed << tr("Couldn't insert the pages of %1.").arg(name);
     }
   }
-  if (inserted > 0) t->view()->goToPage(start);
+  if (inserted > 0) {
+    t->view()->goToPage(start);
+    selectPagesAfterEdit(t, start, inserted);
+  }
   if (!failed.isEmpty()) QMessageBox::warning(this, tr("Insert Pages"), failed.join("\n\n"));
   if (inserted > 0)
     statusBar()->showMessage(inserted == 1 ? tr("Inserted 1 page") : tr("Inserted %1 pages").arg(inserted), 4000);
@@ -1844,8 +1966,14 @@ void MainWindow::insertPagesFromFile() {
 void MainWindow::rotatePages(int degrees) {
   DocumentTab* t = tab();
   if (!t || !t->hasDocument()) return;
-  const std::vector<int> pages = t->thumbnails()->selectedPages();
-  if (pages.empty()) return;
+  rotatePageList(t, selectedPages(t), degrees);
+}
+
+void MainWindow::rotatePageList(DocumentTab* t, const std::vector<int>& pages, int degrees) {
+  if (!t || !t->hasDocument() || pages.empty()) return;
+  // Organizing, the selection stays as it was (a page turned by its hover button needn't be
+  // selected); otherwise the thumbnails show the pages turned, selected for turning again.
+  const std::vector<int> organizerSelection = t->organizer()->grid()->selectedPages();
   t->applyEdit(pages.size() == 1 ? tr("Rotate Page") : tr("Rotate Pages"), t->view()->currentPage(),
                DocumentTab::Scope::Pages, [&](pdfz::Document& d) {
                  bool any = false;
@@ -1856,6 +1984,7 @@ void MainWindow::rotatePages(int degrees) {
   th->selectPages(pages.front(), 1);
   if (pages.size() > 1)  // keep the whole selection, for rotating again
     for (int p : pages) th->selectionModel()->select(th->model()->index(p, 0), QItemSelectionModel::Select);
+  t->organizer()->grid()->selectPageList(organizerSelection);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2667,7 +2796,7 @@ void MainWindow::extractPages() {
   if (!t || !t->hasDocument()) return;
   t->finishTextEditing();
   const int count = t->document()->pageCount();
-  std::vector<int> chosen = t->thumbnails()->selectedPages();
+  std::vector<int> chosen = selectedPages(t);
   if (chosen.empty()) chosen.assign(1, t->view()->currentPage());
 
   QDialog dlg(this);

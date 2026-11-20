@@ -21,7 +21,9 @@
 namespace pdfz { class Document; }
 class CommentsPanel;
 class DocumentView;
+class PageOrganizer;
 class PageRenderer;
+class QStackedLayout;
 class ThumbnailPanel;
 
 class DocumentTab : public QWidget {
@@ -39,6 +41,10 @@ public:
 
   DocumentView* view() const { return view_; }
   ThumbnailPanel* thumbnails() const { return thumbs_; }
+  // Pages > Organize Pages: the grid of pages in the page view's place.
+  PageOrganizer* organizer() const { return organizer_; }
+  bool isOrganizing() const;
+  void setOrganizing(bool on);
   CommentsPanel* comments() const { return comments_; }
   TextSearch* search() const { return search_; }
 
@@ -149,6 +155,8 @@ private:
   TextSearch* search_;
   DocumentView* view_;
   ThumbnailPanel* thumbs_;    // shown in the main window's Pages panel
+  PageOrganizer* organizer_;
+  QStackedLayout* stack_;
   CommentsPanel* comments_;   // shown in its Comments panel
   std::shared_ptr<const AnnotationList> keepAlive_;  // for annotation()
   // While a text box already in the document is typed in: the document from before, for undo.
