@@ -158,6 +158,25 @@ bool DocumentTab::applyEdit(const QString& label, int page, Scope scope,
   return true;
 }
 
+bool DocumentTab::applyPagesEdit(const QString& label, int page, const std::function<bool(pdfz::Document&)>& change,
+                                 std::vector<int> from, std::vector<int> turned, int degrees) {
+  if (!doc_) return false;
+  finishTextEditing();
+  QApplication::setOverrideCursor(Qt::WaitCursor);
+  auto before = pdfz::EditHistory::capture(*doc_, view_->currentPage());
+  QApplication::restoreOverrideCursor();
+  if (!before.bytes) {
+    QMessageBox::warning(this, label, tr("Couldn't prepare to undo this change, so it wasn't made."));
+    return false;
+  }
+  if (!change(*doc_)) return false;
+  history_.push(std::move(before), label.toStdString());
+  if (!from.empty()) renderer_->rearrange(from);
+  for (int p : turned) renderer_->pageTurned(p, degrees);
+  refreshPages(page, false, true);
+  return true;
+}
+
 void DocumentTab::refresh(Scope scope, int page, int pageToShow, bool keepView) {
   if (scope == Scope::Field) {
     // The field may be shown on other pages too (those looked at so far are known).
@@ -199,6 +218,10 @@ void DocumentTab::refresh(Scope scope, int page, int pageToShow, bool keepView) 
     emit contentChanged(false);
     return;
   }
+  refreshPages(pageToShow, keepView, false);
+}
+
+void DocumentTab::refreshPages(int pageToShow, bool keepView, bool rearranged) {
   view_->clearSelection();
   view_->clearAnnotationSelection();
   view_->clearContentSelection();
@@ -206,7 +229,7 @@ void DocumentTab::refresh(Scope scope, int page, int pageToShow, bool keepView) 
   annots_.setDocument(doc_);
   fields_.setDocument(doc_);
   content_.setDocument(doc_);
-  renderer_->invalidate();
+  if (!rearranged) renderer_->invalidate();
   thumbs_->documentChanged();
   organizer_->grid()->documentChanged();
   comments_->setDocument(doc_);

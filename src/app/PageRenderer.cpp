@@ -6,6 +6,7 @@
 
 #include <QElapsedTimer>
 #include <QMetaObject>
+#include <QTransform>
 
 #include <algorithm>
 #include <cmath>
@@ -113,6 +114,68 @@ void PageRenderer::TileCache::clear() {
 }
 
 std::vector<TileKey> PageRenderer::TileCache::keys() const { return {order_.begin(), order_.end()}; }
+
+void PageRenderer::TileCache::remapPages(const std::function<int(int)>& newPage) {
+  QHash<TileKey, Entry> entries;
+  std::list<TileKey> order;
+  total_ = 0;
+  for (const TileKey& k : order_) {
+    const int to = newPage(k.page);
+    if (to < 0) continue;
+    Entry e = entries_.take(k);
+    TileKey nk = k;
+    nk.page = to;
+    order.push_back(nk);
+    e.pos = std::prev(order.end());
+    total_ += e.cost;
+    entries.insert(nk, std::move(e));
+  }
+  entries_ = std::move(entries);
+  order_ = std::move(order);
+}
+
+void PageRenderer::rearrange(const std::vector<int>& from) {
+  // Work asked for, and being done, is for the old page numbers: dropped (asked for again).
+  ++serial_;
+  {
+    std::lock_guard lock(mutex_);
+    clearQueues();
+    jobSerial_ = serial_;
+  }
+  std::vector<int> to;  // old index -> new
+  for (int i = 0; i < int(from.size()); ++i)
+    if (from[std::size_t(i)] >= 0) {
+      if (int(to.size()) <= from[std::size_t(i)]) to.resize(std::size_t(from[std::size_t(i)]) + 1, -1);
+      to[std::size_t(from[std::size_t(i)])] = i;
+    }
+  auto newPage = [&](int old) { return old >= 0 && old < int(to.size()) ? to[std::size_t(old)] : -1; };
+  tiles_.remapPages(newPage);
+  std::vector<std::pair<int, Cached*>> previews;
+  for (int old : previews_.keys())
+    if (Cached* c = previews_.take(old)) previews.emplace_back(newPage(old), c);
+  for (auto& [page, c] : previews) {
+    if (page < 0) delete c;
+    else previews_.insert(page, c, costKiB(c->image));
+  }
+  QHash<int, quint64> epochs;
+  for (auto it = pageEpochs_.cbegin(); it != pageEpochs_.cend(); ++it)
+    if (const int page = newPage(it.key()); page >= 0) epochs.insert(page, it.value());
+  pageEpochs_ = std::move(epochs);
+}
+
+void PageRenderer::pageTurned(int page, int degrees) {
+  tiles_.remapPages([page](int p) { return p == page ? -1 : p; });
+  const quint64 was = epochOf(page);
+  ++pageEpochs_[page];  // drawn again; the turned preview shows meanwhile
+  if (Cached* c = previews_.take(page)) {
+    c->image = c->image.transformed(QTransform().rotate(((degrees % 360) + 360) % 360));
+    c->epoch = was;
+    previews_.insert(page, c, costKiB(c->image));
+  }
+  std::lock_guard lock(mutex_);
+  for (auto* q : {&viewJobs_, &lowJobs_})
+    q->erase(std::remove_if(q->begin(), q->end(), [&](const Job& j) { return j.page == page; }), q->end());
+}
 
 QImage PageRenderer::tile(const TileKey& key, bool* fresh) const {
   const Cached* c = tiles_.get(key);

@@ -101,6 +101,26 @@ QString lastDir() {
 
 void rememberDir(const QString& file) { QSettings().setValue("lastDir", QFileInfo(file).absolutePath()); }
 
+// Where each page comes from after a page edit (see DocumentTab::applyPagesEdit).
+std::vector<int> afterDeleting(int count, const std::vector<int>& pages) {
+  std::vector<int> from;
+  for (int i = 0; i < count; ++i)
+    if (!std::binary_search(pages.begin(), pages.end(), i)) from.push_back(i);
+  return from;
+}
+std::vector<int> afterInserting(int count, int at, int n) {
+  std::vector<int> from;
+  for (int i = 0; i < at; ++i) from.push_back(i);
+  for (int i = 0; i < n; ++i) from.push_back(-1);
+  for (int i = at; i < count; ++i) from.push_back(i);
+  return from;
+}
+std::vector<int> afterMoving(int count, const std::vector<int>& pages, int dest) {
+  std::vector<int> from = afterDeleting(count, pages);
+  from.insert(from.begin() + std::clamp(dest, 0, int(from.size())), pages.begin(), pages.end());
+  return from;
+}
+
 // "1-3, 5" for showing which pages an action changed.
 QString describePages(const std::vector<int>& pages) {
   QStringList parts;
@@ -1810,8 +1830,9 @@ void MainWindow::movePages(DocumentTab* t, const std::vector<int>& pages, int in
   for (int i = 0; i < n; ++i)
     if (pages[std::size_t(i)] != dest + i) unchanged = false;
   if (unchanged) return;
-  if (t->applyEdit(n == 1 ? tr("Move Page") : tr("Move Pages"), dest, DocumentTab::Scope::Pages,
-                   [&](pdfz::Document& d) { return d.movePages(pages, dest); })) {
+  if (t->applyPagesEdit(n == 1 ? tr("Move Page") : tr("Move Pages"), dest,
+                        [&](pdfz::Document& d) { return d.movePages(pages, dest); },
+                        afterMoving(t->document()->pageCount(), pages, dest))) {
     selectPagesAfterEdit(t, dest, n);
     statusBar()->showMessage(tr("Moved %1").arg(n == 1 ? tr("page %1").arg(pages[0] + 1)
                                                        : tr("pages %1").arg(describePages(pages))), 3000);
@@ -1863,8 +1884,9 @@ void MainWindow::deletePageList(DocumentTab* t, const std::vector<int>& pages) {
     return;
   }
   const QString which = pages.size() == 1 ? tr("page %1").arg(pages[0] + 1) : tr("pages %1").arg(describePages(pages));
-  if (t->applyEdit(pages.size() == 1 ? tr("Delete Page") : tr("Delete Pages"), pages.front(), DocumentTab::Scope::Pages,
-                   [&](pdfz::Document& d) { return d.deletePages(pages); })) {
+  if (t->applyPagesEdit(pages.size() == 1 ? tr("Delete Page") : tr("Delete Pages"), pages.front(),
+                        [&](pdfz::Document& d) { return d.deletePages(pages); },
+                        afterDeleting(t->document()->pageCount(), pages))) {
     // The page after them (or the last) is selected next, ready for another.
     selectPagesAfterEdit(t, std::min(pages.front(), t->document()->pageCount() - 1), 1);
     statusBar()->showMessage(tr("Deleted %1 (Ctrl+Z to undo)").arg(which), 4000);
@@ -1883,8 +1905,8 @@ void MainWindow::insertBlankPage(int at) {
   const int rot = t->document()->pageRotation(like);
   if (rot == 90 || rot == 270) std::swap(size.width, size.height);  // a new page isn't rotated
   if (size.width <= 0) size = pdfz::kLetter;
-  if (t->applyEdit(tr("Insert Blank Page"), at, DocumentTab::Scope::Pages,
-                   [&](pdfz::Document& d) { return d.insertBlankPage(at, size); }))
+  if (t->applyPagesEdit(tr("Insert Blank Page"), at, [&](pdfz::Document& d) { return d.insertBlankPage(at, size); },
+                        afterInserting(t->document()->pageCount(), at, 1)))
     selectPagesAfterEdit(t, at, 1);
 }
 
@@ -1918,8 +1940,8 @@ void MainWindow::insertPagesFromFile(int startAt) {
       }
       // The size of the page it goes after (or before, at the start).
       const pdfz::SizeF size = t->document()->pageSize(std::max(0, at - 1));
-      if (t->applyEdit(tr("Insert Picture"), at, DocumentTab::Scope::Pages,
-                       [&](pdfz::Document& d) { return d.insertImagePage(at, size, img); })) {
+      if (t->applyPagesEdit(tr("Insert Picture"), at, [&](pdfz::Document& d) { return d.insertImagePage(at, size, img); },
+                            afterInserting(t->document()->pageCount(), at, 1))) {
         ++at;
         ++inserted;
       } else {
@@ -1946,8 +1968,9 @@ void MainWindow::insertPagesFromFile(int startAt) {
     if (!other) continue;
     std::vector<int> pages(std::size_t(other->pageCount()));
     for (int i = 0; i < other->pageCount(); ++i) pages[std::size_t(i)] = i;
-    if (!pages.empty() && t->applyEdit(tr("Insert Pages"), at, DocumentTab::Scope::Pages,
-                                       [&](pdfz::Document& d) { return d.importPages(*other, pages, at); })) {
+    if (!pages.empty() &&
+        t->applyPagesEdit(tr("Insert Pages"), at, [&](pdfz::Document& d) { return d.importPages(*other, pages, at); },
+                          afterInserting(t->document()->pageCount(), at, int(pages.size())))) {
       at += int(pages.size());
       inserted += int(pages.size());
     } else {
@@ -1974,12 +1997,14 @@ void MainWindow::rotatePageList(DocumentTab* t, const std::vector<int>& pages, i
   // Organizing, the selection stays as it was (a page turned by its hover button needn't be
   // selected); otherwise the thumbnails show the pages turned, selected for turning again.
   const std::vector<int> organizerSelection = t->organizer()->grid()->selectedPages();
-  t->applyEdit(pages.size() == 1 ? tr("Rotate Page") : tr("Rotate Pages"), t->view()->currentPage(),
-               DocumentTab::Scope::Pages, [&](pdfz::Document& d) {
-                 bool any = false;
-                 for (int p : pages) any = d.setPageRotation(p, d.pageRotation(p) + degrees) || any;
-                 return any;
-               });
+  t->applyPagesEdit(
+      pages.size() == 1 ? tr("Rotate Page") : tr("Rotate Pages"), t->view()->currentPage(),
+      [&](pdfz::Document& d) {
+        bool any = false;
+        for (int p : pages) any = d.setPageRotation(p, d.pageRotation(p) + degrees) || any;
+        return any;
+      },
+      {}, pages, degrees);
   ThumbnailPanel* th = t->thumbnails();
   th->selectPages(pages.front(), 1);
   if (pages.size() > 1)  // keep the whole selection, for rotating again

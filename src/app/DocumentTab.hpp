@@ -60,6 +60,12 @@ public:
   // An undoable edit: snapshots the document, runs `change` (true if it changed anything), then
   // redraws and shows `page`.
   bool applyEdit(const QString& label, int page, Scope scope, const std::function<bool(pdfz::Document&)>& change);
+  // An edit to the pages themselves (turning, deleting, inserting, moving) in which what was
+  // drawn of each page is kept, so the pages and thumbnails don't flash blank: `from[i]` is
+  // the old index of page i after the change (-1 for a new page; empty if no page moved), and
+  // the pages in `turned` (indices after the change) were turned by `degrees`.
+  bool applyPagesEdit(const QString& label, int page, const std::function<bool(pdfz::Document&)>& change,
+                      std::vector<int> from, std::vector<int> turned = {}, int degrees = 0);
   void undo();
   void redo();
 
@@ -128,6 +134,9 @@ private:
   // `keepView`: the pages stay where they are on the screen (undo, redo) if `pageToShow` is
   // in view.
   void refresh(Scope scope, int page, int pageToShow, bool keepView = false);
+  // Scope::Pages's refresh, with the renderings kept (see applyPagesEdit); `rearranged` false
+  // drops them all instead.
+  void refreshPages(int pageToShow, bool keepView, bool rearranged);
   void showDocument(std::shared_ptr<pdfz::Document> doc, int pageToShow);  // undo/redo swap
   QString kindLabel(const pdfz::Annotation& a) const;
   bool fillField(int page, int index, const std::function<bool(pdfz::Document&)>& change);

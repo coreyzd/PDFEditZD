@@ -12,6 +12,7 @@
 
 #include <condition_variable>
 #include <deque>
+#include <functional>
 #include <list>
 #include <memory>
 #include <mutex>
@@ -55,6 +56,13 @@ public:
   // It stays cached, and keeps being shown, until the new rendering replaces it, so the page
   // never goes blank in between.
   void invalidatePage(int page);
+  // The pages were moved, deleted or added within the same document: what was rendered of each
+  // goes along with it, so nothing flashes blank. `from[i]` is the old index of what's now page
+  // i (-1 for a new page).
+  void rearrange(const std::vector<int>& from);
+  // `page` was turned by `degrees` (a multiple of 90): its preview is turned along, shown until
+  // it's drawn again; its tiles are gone (another shape).
+  void pageTurned(int page, int degrees);
 
   // Rounds a scale to one tiles are made at, so nearby zooms share them.
   static int scaleKeyFor(double devicePixelsPerPoint);
@@ -112,6 +120,8 @@ private:
     void insert(const TileKey& key, Cached value, qsizetype cost);
     void clear();
     std::vector<TileKey> keys() const;
+    // Every tile's page through `newPage` (-1: the tile goes), in the same order of use.
+    void remapPages(const std::function<int(int)>& newPage);
 
   private:
     struct Entry {
