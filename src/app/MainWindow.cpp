@@ -88,6 +88,42 @@ const char* const kPdfFilter = QT_TRANSLATE_NOOP("MainWindow", "PDF documents (*
 
 std::filesystem::path toFsPath(const QString& s) { return std::filesystem::path(s.toStdU16String()); }
 
+// A global menu (KDE Plasma's, or any other that takes the menu bar over D-Bus) gets its labels
+// from Qt, which turns only the first '&' into D-Bus's mnemonic mark and passes "&&" on as it is.
+// D-Bus menus have no escape for '&', so "F&ill && Sign" showed its ampersands piled up there.
+// For such a menu bar a label's "&&" becomes one '&'. (The label's mnemonic has to come before
+// its ampersand, as it does in ours, since Qt converts the first '&' it finds.)
+bool dbusMenuBar(const QMenuBar* bar) {
+#if defined(Q_OS_UNIX) && !defined(Q_OS_MACOS)
+  return bar->isNativeMenuBar();
+#else
+  Q_UNUSED(bar);
+  return false;  // Windows has no native menu bar; macOS's handles "&&" itself
+#endif
+}
+
+QString dbusMenuText(QString text) { return text.replace(QStringLiteral("&&"), QStringLiteral("&")); }
+
+// The action to put in a menu bar menu: the action itself, or for a D-Bus menu bar and a label
+// with "&&", a stand-in with the label fixed that follows the action and triggers it. (The action
+// keeps its label for the in-window menus that show it too, such as the toolbars' context menu.)
+QAction* menuBarAction(const QMenuBar* bar, QAction* a) {
+  if (!dbusMenuBar(bar) || !a->text().contains(QStringLiteral("&&"))) return a;
+  auto* m = new QAction(dbusMenuText(a->text()), a);
+  auto follow = [a, m] {
+    m->setCheckable(a->isCheckable());
+    m->setChecked(a->isChecked());
+    m->setEnabled(a->isEnabled());
+    m->setVisible(a->isVisible());
+    m->setIcon(a->icon());
+  };
+  follow();
+  QObject::connect(a, &QAction::changed, m, follow);
+  QObject::connect(a, &QAction::toggled, m, &QAction::setChecked);
+  QObject::connect(m, &QAction::triggered, a, &QAction::trigger);
+  return m;
+}
+
 QIcon themeIcon(const char* name, QStyle::StandardPixmap fallback = QStyle::SP_CustomBase) {
   if (fallback == QStyle::SP_CustomBase) return QIcon::fromTheme(QLatin1String(name));
   return QIcon::fromTheme(QLatin1String(name), QApplication::style()->standardIcon(fallback));
@@ -1029,6 +1065,10 @@ void MainWindow::createMenus() {
   comment->addAction(authorAct_);
 
   QMenu* fill = menuBar()->addMenu(tr("F&ill && Sign"));
+  // Plasma's global menu shows a top-level menu's '&' doubled whatever Qt sends it (its buttons
+  // turn the D-Bus label back into Qt's form, "&&" for an '&', and then don't take "&&" as an
+  // escape), so the title there has a full-width ampersand in its place. Shown only there.
+  if (dbusMenuBar(menuBar())) fill->setTitle(fill->title().replace(QStringLiteral("&&"), QChar(0xFF06)));
   for (int i = kCommentToolCount; i < kMarkupToolCount; ++i) fill->addAction(markupActs_[std::size_t(i)]);
   fill->addSeparator();
   signMenu_ = new QMenu(tr("&Sign"), this);
@@ -1464,7 +1504,7 @@ void MainWindow::createToolBars() {
   viewMenu_->insertAction(nextTabAct_, toggle);
   QAction* toggleFill = fillBar_->toggleViewAction();
   toggleFill->setText(tr("&Fill && Sign Tools"));
-  viewMenu_->insertAction(nextTabAct_, toggleFill);
+  viewMenu_->insertAction(nextTabAct_, menuBarAction(menuBar(), toggleFill));
   viewMenu_->insertSeparator(nextTabAct_);
 }
 
